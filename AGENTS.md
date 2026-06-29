@@ -152,4 +152,5 @@ search_code(query="user authentication", project="/path/to/project")
 
 - Сервер: `opencode serve` должен быть запущен (auto-spawn)
 - `.opencode/` копируется автоматически при `--cwd`
-- БД: `.agents/orchestrator.db` — per-project, не коммитить в git
+- Результаты прогонов: `.deus/runs/run-{ts}/` — отчёты в `.md`
+- БД: `.deus/kb/orchestrator.db` — per-project, не коммитить в git (`.deus/.gitignore` создаётся автоматически)

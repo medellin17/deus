@@ -43,7 +43,7 @@ export class KBDatabase {
   private db: Database.Database;
   private dbPath: string;
 
-  constructor(dbPath: string = '.agents/orchestrator.db') {
+  constructor(dbPath: string = '.deus/kb/orchestrator.db') {
     this.dbPath = dbPath;
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');

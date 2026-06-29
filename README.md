@@ -61,12 +61,29 @@ Knowledge Base (SQLite + FTS5)
 | architect-planner-pro | `deepseek-v4-pro` | `max` |
 | All others | `deepseek-v4-flash` | `max` |
 
+## Project Structure
+
+Each run creates a timestamped folder in the target project:
+
+```
+.deus/
+├── .gitignore              # ignores everything inside
+├── kb/
+│   └── orchestrator.db     # Knowledge Base (SQLite + FTS5)
+└── runs/
+    └── run-2026-06-29T14-20-00/
+        ├── index.md         # summary with links
+        ├── security-auditor.md
+        ├── code-reviewer.md
+        └── ...
+```
+
 ## Knowledge Base
 
 - **FTS5** — keyword search (BM25, zero dependencies)
 - **Memory Tree** — hierarchical summaries (file/module/project)
 - **SuperContext** — auto-context generation for tasks
-- **Per-project** — each project has its own DB (`.agents/orchestrator.db`)
+- **Per-project** — each project has its own DB (`.deus/kb/orchestrator.db`)
 
 ## Smart Context Integration
 

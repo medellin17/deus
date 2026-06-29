@@ -115,4 +115,4 @@ The orchestrator uses a Knowledge Base (SQLite + FTS5) for context between sessi
 - Auto-indexes project on first run
 - Injects relevant context before planning
 - Saves task results to memory tree
-- Per-project isolation (`.agents/orchestrator.db`)
+- Per-project isolation (`.deus/kb/orchestrator.db`)

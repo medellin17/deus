@@ -15,10 +15,14 @@
  */
 
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, execSync, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { createKB, type KnowledgeBase } from "./kb/index.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -124,7 +128,7 @@ function getKB(projectPath?: string): KnowledgeBase {
   const projectDir = projectPath || kbProjectPath || globalCwd;
   if (!kb || kbProjectPath !== projectDir) {
     if (kb) kb.close();
-    const dbPath = require("path").join(projectDir, ".agents", "orchestrator.db");
+    const dbPath = path.join(projectDir, ".deus", "kb", "orchestrator.db");
     kb = createKB(dbPath);
     kbProjectPath = projectDir;
   }
@@ -212,6 +216,15 @@ function stopServer(): void {
   }
 }
 
+function ensureDeusDir(targetDir: string): void {
+  const deusDir = path.join(targetDir, ".deus");
+  fs.mkdirSync(deusDir, { recursive: true });
+  const gitignorePath = path.join(deusDir, ".gitignore");
+  if (!fs.existsSync(gitignorePath)) {
+    fs.writeFileSync(gitignorePath, "# Deus runtime data\n*\n", "utf-8");
+  }
+}
+
 function copyOpenCodeToTarget(targetDir: string): void {
   const sourceDir = path.join(__dirname, "..", ".opencode");
   const destDir = path.join(targetDir, ".opencode");
@@ -262,7 +275,7 @@ function installSmartContext(targetDir: string): void {
 
   log("INFO", "Установка Smart Context Retrieving...");
   try {
-    const { execSync } = require("child_process");
+      // execSync is imported at the top
     execSync("npm install smart-context-retrieving", {
       cwd: targetDir,
       stdio: "pipe",
@@ -332,7 +345,7 @@ npx tsx /path/to/deus/src/orchestrator.ts --kb-stats --cwd .
 
 - FTS5 — keyword поиск (BM25)
 - Memory Tree — иерархические саммари
-- Per-project — БД в .agents/orchestrator.db
+- Per-project — БД в .deus/kb/orchestrator.db
 
 ### Custom Tools
 
@@ -468,7 +481,10 @@ async function runSessionWithRetry(task: string, agent: string, timeoutMs?: numb
 
 async function runOrchestrate(task: string): Promise<StepResult> {
   log("INFO", `▶ Оркестрация: LLM-конductor выбирает пайплайн и управляет агентами`);
-  log("INFO", `  Конductor: ${DEFAULT_AGENT} (mimo-v2.5-pro)`);
+  const cfgPath = path.join(globalCwd, ".opencode", "opencode.json");
+  let conductorModel = "unknown";
+  try { const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); conductorModel = cfg.agent?.[DEFAULT_AGENT]?.model || cfg.model || "unknown"; } catch {}
+  log("INFO", `  Конductor: ${DEFAULT_AGENT} (${conductorModel})`);
   log("INFO", `  Задача: ${task.slice(0, 120)}${task.length > 120 ? "..." : ""}`);
 
   // Auto-inject context from Knowledge Base
@@ -618,12 +634,52 @@ function printStep(r: StepResult, num: number): void {
   }
 }
 
+function saveResults(p: PipelineResult, mode: string, task: string): void {
+  const ts = Date.now();
+  const dateStr = new Date(ts).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const runDir = path.join(globalCwd, ".deus", "runs", `run-${dateStr}`);
+  fs.mkdirSync(runDir, { recursive: true });
+
+  // summary index
+  const summary: string[] = [];
+  summary.push(`# Orchestrator Report — ${mode}`);
+  summary.push(``);
+  summary.push(`- **Задача:** ${task}`);
+  summary.push(`- **Дата:** ${new Date(ts).toISOString()}`);
+  summary.push(`- **Статус:** ${p.success ? "✅ Успешно" : "❌ Ошибка"}`);
+  summary.push(`- **Всего:** ${fmtDuration(p.totalDurationMs)}`);
+  summary.push(``);
+  summary.push(`| Шаг | Агент | Статус | Длит. | Файл |`);
+  summary.push(`|-----|-------|--------|-------|------|`);
+
+  for (const s of p.steps) {
+    const safeName = s.agent.replace(/[^a-z0-9-]/gi, "_");
+    const fname = `${safeName}.md`;
+    const fpath = path.join(runDir, fname);
+    const content = `# ${s.agent}\n\n- **Задача:** ${s.task}\n- **Статус:** ${s.success ? "✅" : "❌"}\n- **Длительность:** ${fmtDuration(s.durationMs)}\n${s.error ? `- **Ошибка:** ${s.error}\n` : ""}\n---\n\n${s.output || "_пусто_"}\n`;
+    try { fs.writeFileSync(fpath, content, "utf-8"); } catch {}
+    summary.push(`| ${s.stepIndex + 1} | ${s.agent} | ${s.success ? "✅" : "❌"} | ${fmtDuration(s.durationMs)} | \`${fname}\` |`);
+  }
+
+  summary.push(``);
+  summary.push(`---`);
+  summary.push(`*Сохранено в \`${runDir}\`*`);
+
+  const indexPath = path.join(runDir, "index.md");
+  try { fs.writeFileSync(indexPath, summary.join("\n"), "utf-8"); console.log(`\n📁 Результаты: ${runDir}`); } catch (e: unknown) { console.log(`\n⚠️ Не удалось сохранить: ${e instanceof Error ? e.message : String(e)}`); }
+}
+
 function printPipeline(p: PipelineResult): void {
   console.log(`\n${p.success ? "✅" : "❌"} ${p.steps.length} шагов, ${fmtDuration(p.totalDurationMs)}`);
   for (const s of p.steps) {
+    console.log(`\n${"═".repeat(60)}`);
     console.log(`  ${s.success ? "✓" : "✗"} [${s.stepIndex + 1}] ${s.agent} — ${fmtDuration(s.durationMs)}`);
     if (s.error) console.log(`      Ошибка: ${s.error}`);
+    if (s.output) {
+      console.log(`\n  Ответ:\n${s.output}`);
+    }
   }
+  console.log(`\n${"═".repeat(60)}`);
 }
 
 function printResult(r: StepResult): void {
@@ -735,7 +791,9 @@ async function main(): Promise<void> {
   const { mode, agent, pipeline, tasks, cwd } = parseArgs(process.argv);
 
   if (mode === "help") { printHelp(); return; }
-  if (cwd) globalCwd = require("path").resolve(cwd);
+  if (cwd) globalCwd = path.resolve(cwd);
+
+  ensureDeusDir(globalCwd);
 
   // Auto-copy .opencode/ to target project
   if (globalCwd !== process.cwd()) {
@@ -778,6 +836,7 @@ async function main(): Promise<void> {
         }));
         const r = await runPipeline(filled);
         printPipeline(r);
+        saveResults(r, "pipeline", tasks[0]);
         process.exit(r.success ? 0 : 1);
         break;
       }
@@ -788,7 +847,7 @@ async function main(): Promise<void> {
         break;
       }
       case "index": {
-        const target = require("path").resolve(tasks[0]);
+        const target = path.resolve(tasks[0]);
         const kbInstance = getKB(target);
         log("INFO", `Индексация: ${target}`);
         kbInstance.indexDirectory(target);

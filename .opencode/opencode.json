@@ -11,45 +11,59 @@
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "researcher-explorer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "architect-planner": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "implementer-builder": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "reviewer-critic": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "integrator-qa": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "debug": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "doc-maintainer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "content-writer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "data-analyst": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "ux-designer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "code-reviewer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "test-engineer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "security-auditor": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "skills-indexer": {
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     }
   }
