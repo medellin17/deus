@@ -121,6 +121,27 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 | `kb_embeddings` | Векторные эмбеддинги |
 | `kb_memory_tree` | Иерархические саммари |
 
+## Custom Tools
+
+### search-code
+
+Инструмент для умного поиска кода на базе [Smart Context Retrieving](https://github.com/medellin17/smart-context-retrieving).
+
+- **BM25** — keyword поиск с синонимами
+- **Symbol Graph** — парсинг функций/классов/типов + call_graph
+- **Graph Walk** — 1-2 hops по графу вызовов
+- **Category Weights** — per-category веса для bugfix/feature/refactor
+- **Skeletonization** — сжатие файлов >400 строк до структуры
+
+**Использование:**
+```
+search_code(query="user authentication", project="/path/to/project")
+```
+
+**Требования:**
+- `npm install smart-context-retrieving` в целевом проекте
+- `npx code-assistant index .` для индексации
+
 ## Добавление агента
 
 1. Создать `.opencode/agents/{name}.md` с промптом
@@ -129,7 +150,6 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 
 ## Ограничения
 
-- Windows: скрипт использует PowerShell
 - Сервер: `opencode serve` должен быть запущен (auto-spawn)
 - `.opencode/` копируется автоматически при `--cwd`
 - БД: `.agents/orchestrator.db` — per-project, не коммитить в git

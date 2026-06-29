@@ -68,6 +68,37 @@ Knowledge Base (SQLite + FTS5)
 - **SuperContext** — auto-context generation for tasks
 - **Per-project** — each project has its own DB (`.agents/orchestrator.db`)
 
+## Smart Context Integration
+
+Deus includes a custom tool for [Smart Context Retrieving](https://github.com/medellin17/smart-context-retrieving) — smart code search using BM25 + Symbol Graph + Graph Walk.
+
+### Setup
+
+```bash
+# Install Smart Context in your project
+cd /your/project
+npm install smart-context-retrieving
+
+# Index your project
+npx code-assistant index .
+```
+
+### Usage
+
+Agents automatically use `search_code` tool before reading or editing code:
+
+```
+search_code(query="user authentication", project="/path/to/project")
+```
+
+### What it does
+
+- **BM25** — keyword search with synonyms
+- **Symbol Graph** — parses functions/classes/types and their calls
+- **Graph Walk** — 1-2 hops along call graph
+- **Category Weights** — different ranking for bugfix/feature/refactor
+- **Skeletonization** — compresses large files to structure + relevant chunks
+
 ### Tables
 
 | Table | Purpose |
