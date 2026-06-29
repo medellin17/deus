@@ -128,6 +128,11 @@ search_code(query="user authentication", project="/path/to/project")
 - OpenCode CLI (`npm i -g opencode`)
 - `GEMINI_API_KEY` (optional, for embeddings)
 
+## Related Projects
+
+- [opencode-orchestrator](https://github.com/medellin17/opencode-orchestrator) — v1, original orchestrator that inspired Deus
+- [smart-context-retrieving](https://github.com/medellin17/smart-context-retrieving) — smart code search (BM25 + Symbol Graph + Graph Walk), integrated as custom tool
+
 ## License
 
 Apache 2.0

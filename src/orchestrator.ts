@@ -274,6 +274,93 @@ function installSmartContext(targetDir: string): void {
   }
 }
 
+const ORCHESTRATOR_AGENTS_SECTION = `## Deus Orchestrator
+
+Этот проект подключён к [Deus](https://github.com/medellin17/deus) — multi-agent оркестратору для OpenCode.
+
+### Доступные агенты (16)
+
+| Агент | Роль |
+|-------|------|
+| orchestrator-conductor | Главный дирижёр, декомпозирует и dispatch-ит задачи |
+| architect-planner | Базовый архитектор |
+| architect-planner-pro | Продвинутый архитектор (deepseek-v4-pro) |
+| implementer-builder | Пишет код |
+| reviewer-critic | Код-ревью |
+| integrator-qa | Тестирование |
+| researcher-explorer | Анализ кодовой базы |
+| debug | Диагностика багов |
+| security-auditor | Аудит безопасности |
+| code-reviewer | Структурированный ревью |
+| content-writer | Тексты, документация |
+| doc-maintainer | Ведение документации |
+| test-engineer | Написание тестов |
+| data-analyst | Анализ данных |
+| ux-designer | UX/UI |
+| skills-indexer | Индексация skills |
+
+### Команды
+
+\`\`\`bash
+# Оркестрация (LLM-конductor сам выбирает пайплайн)
+npx tsx /path/to/deus/src/orchestrator.ts --cwd . "задача"
+
+# Статический пайплайн
+npx tsx /path/to/deus/src/orchestrator.ts --cwd . --pipeline build "задача"
+
+# Один агент
+npx tsx /path/to/deus/src/orchestrator.ts --cwd . --agent implementer-builder "задача"
+
+# Индексация проекта в KB
+npx tsx /path/to/deus/src/orchestrator.ts --index .
+
+# Статистика KB
+npx tsx /path/to/deus/src/orchestrator.ts --kb-stats --cwd .
+\`\`\`
+
+### Пайплайны
+
+| Название | Шаги |
+|----------|------|
+| build | researcher → architect → implementer → reviewer → qa |
+| build-pro | researcher → architect-pro → implementer → reviewer → qa |
+| audit | security → code-reviewer → reviewer |
+| debug | researcher → debug → implementer → qa |
+| docs | researcher → content-writer → reviewer |
+
+### Knowledge Base
+
+- FTS5 — keyword поиск (BM25)
+- Memory Tree — иерархические саммари
+- Per-project — БД в .agents/orchestrator.db
+
+### Custom Tools
+
+- search_code — умный поиск кода (BM25 + Symbol Graph + Graph Walk)
+  - Требует: npm install smart-context-retrieving + npx code-assistant index .
+  - Автоматически устанавливается при использовании --cwd
+`;
+
+function writeProjectAgentsMd(targetDir: string): void {
+  const agentsPath = path.join(targetDir, "AGENTS.md");
+  const marker = "## Deus Orchestrator";
+
+  if (fs.existsSync(agentsPath)) {
+    const content = fs.readFileSync(agentsPath, "utf-8");
+    if (content.includes(marker)) {
+      log("INFO", "AGENTS.md уже содержит секцию Deus Orchestrator");
+      return;
+    }
+    log("INFO", "Добавление секции Deus Orchestrator в AGENTS.md...");
+    fs.appendFileSync(agentsPath, "\n\n" + ORCHESTRATOR_AGENTS_SECTION, "utf-8");
+    log("INFO", "AGENTS.md обновлён");
+  } else {
+    log("INFO", "Создание AGENTS.md...");
+    fs.writeFileSync(agentsPath, ORCHESTRATOR_AGENTS_SECTION, "utf-8");
+    log("INFO", "AGENTS.md создан");
+  }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function extractText(parts: Array<{ type: string; text?: string }>): string {
@@ -654,6 +741,7 @@ async function main(): Promise<void> {
   if (globalCwd !== process.cwd()) {
     copyOpenCodeToTarget(globalCwd);
     installSmartContext(globalCwd);
+    writeProjectAgentsMd(globalCwd);
   }
 
   const baseUrl = process.env.OPENCODE_URL || DEFAULT_BASE_URL;
