@@ -241,6 +241,39 @@ function copyOpenCodeToTarget(targetDir: string): void {
   log("INFO", `.opencode/ скопирован (${fs.readdirSync(destDir).length} элементов)`);
 }
 
+function installSmartContext(targetDir: string): void {
+  const pkgPath = path.join(targetDir, "package.json");
+  if (!fs.existsSync(pkgPath)) {
+    log("INFO", "Нет package.json — пропуск установки Smart Context");
+    return;
+  }
+
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+    if (allDeps["smart-context-retrieving"]) {
+      log("INFO", "Smart Context уже установлен");
+      return;
+    }
+  } catch {
+    log("WARN", "Не удалось прочитать package.json");
+    return;
+  }
+
+  log("INFO", "Установка Smart Context Retrieving...");
+  try {
+    const { execSync } = require("child_process");
+    execSync("npm install smart-context-retrieving", {
+      cwd: targetDir,
+      stdio: "pipe",
+      timeout: 60000,
+    });
+    log("INFO", "Smart Context установлен");
+  } catch (err) {
+    log("WARN", `Не удалось установить Smart Context: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function extractText(parts: Array<{ type: string; text?: string }>): string {
@@ -620,6 +653,7 @@ async function main(): Promise<void> {
   // Auto-copy .opencode/ to target project
   if (globalCwd !== process.cwd()) {
     copyOpenCodeToTarget(globalCwd);
+    installSmartContext(globalCwd);
   }
 
   const baseUrl = process.env.OPENCODE_URL || DEFAULT_BASE_URL;
