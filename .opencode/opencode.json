@@ -26,6 +26,10 @@
       "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
+    "reviewer-critic-pro": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
     "integrator-qa": {
       "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }

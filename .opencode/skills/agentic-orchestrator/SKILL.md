@@ -23,24 +23,24 @@ User Task
 Conductor (orchestrator-conductor)
     ├── researcher-explorer   (read-only investigation)
     ├── architect-planner*    (design & strategy)
-    ├── [spot-check]          (read/grep verification)
+    ├── reviewer-critic*      (plan review — delegate, don't spot-check)
     ├── implementer-builder   (execution)
-    ├── [spot-check]          (read/grep verification)
-    ├── reviewer-critic       (audit & validation)
+    ├── reviewer-critic*      (implementation review)
     ├── integrator-qa         (testing)
     └── Final Synthesis Report
 ```
 
-## Sub-Agents (16)
+## Sub-Agents (17)
 
 | Agent | Role | Tools |
 |-------|------|-------|
-| `orchestrator-conductor` | Plans, delegates, spot-checks, synthesizes | `task`, `skill`, `read`, `grep` |
+| `orchestrator-conductor` | Plans, delegates, synthesizes (no spot-check) | `task`, `skill` (no `read`/`grep`) |
 | `researcher-explorer` | Read-only exploration, code mapping | `read`, `grep`, `glob`, `webfetch` |
 | `architect-planner` | Design & strategy (simple) | `read`, `grep` |
 | `architect-planner-pro` | Design & strategy (complex/high-stakes) | `read`, `grep` |
 | `implementer-builder` | Writes code, configs, scripts | `read`, `edit`, `write`, `bash` |
-| `reviewer-critic` | Audit & review | `read`, `grep` |
+| `reviewer-critic` | Audit & review (standard) | `read`, `grep` |
+| `reviewer-critic-pro` | Audit & review (high-stakes, pro model) | `read`, `grep` |
 | `integrator-qa` | Runs tests, validates | `read`, `bash` |
 | `content-writer` | Writing & copywriting | `read`, `write`, `edit` |
 | `data-analyst` | Analysis & processing | `read`, `write`, `bash` |

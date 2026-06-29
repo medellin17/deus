@@ -63,6 +63,7 @@ const VALID_AGENTS = [
   "architect-planner-pro",
   "implementer-builder",
   "reviewer-critic",
+  "reviewer-critic-pro",
   "integrator-qa",
   "debug",
   "doc-maintainer",
@@ -89,8 +90,17 @@ const PIPELINES: Record<string, TaskStep[]> = {
     { task: "Исследуй кодовую базу: {task}", agent: "researcher-explorer" },
     { task: "Создай детальный план (high-stakes): {task}\n\nКонтекст:\n{prev}", agent: "architect-planner-pro" },
     { task: "Реализуй: {task}\n\nПлан:\n{prev}", agent: "implementer-builder" },
-    { task: "Ревью: {task}\n\nРеализация:\n{prev}", agent: "reviewer-critic" },
+    { task: "Ревью (high-stakes): {task}\n\nРеализация:\n{prev}", agent: "reviewer-critic-pro" },
     { task: "Тесты:\n{prev}", agent: "integrator-qa" },
+  ],
+  "full-cycle": [
+    { task: "Исследуй кодовую базу: {task}", agent: "researcher-explorer" },
+    { task: "Создай детальный план (high-stakes): {task}\n\nКонтекст:\n{prev}", agent: "architect-planner-pro" },
+    { task: "Ревью плана: {task}\n\nПлан:\n{prev}", agent: "reviewer-critic-pro" },
+    { task: "Реализуй: {task}\n\nПлан:\n{prev}", agent: "implementer-builder" },
+    { task: "Ревью реализации: {task}\n\nРеализация:\n{prev}", agent: "reviewer-critic-pro" },
+    { task: "Тесты: {task}\n\nРеализация:\n{prev}", agent: "integrator-qa" },
+    { task: "Обнови документацию: {task}\n\nКонтекст:\n{prev}", agent: "doc-maintainer" },
   ],
   audit: [
     { task: "Аудит безопасности: {task}", agent: "security-auditor" },
@@ -312,15 +322,16 @@ const ORCHESTRATOR_AGENTS_SECTION = `## Deus Orchestrator
 
 Этот проект подключён к [Deus](https://github.com/medellin17/deus) — multi-agent оркестратору для OpenCode.
 
-### Доступные агенты (16)
+### Доступные агенты (17)
 
 | Агент | Роль |
 |-------|------|
-| orchestrator-conductor | Главный дирижёр, декомпозирует и dispatch-ит задачи |
+| orchestrator-conductor | Главный дирижёр, декомпозирует, dispatch-ит, синтезирует |
 | architect-planner | Базовый архитектор |
 | architect-planner-pro | Продвинутый архитектор (deepseek-v4-pro) |
 | implementer-builder | Пишет код |
-| reviewer-critic | Код-ревью |
+| reviewer-critic | Код-ревью (стандартные задачи) |
+| reviewer-critic-pro | Продвинутое ревью (deepseek-v4-pro, high-stakes) |
 | integrator-qa | Тестирование |
 | researcher-explorer | Анализ кодовой базы |
 | debug | Диагностика багов |
@@ -357,7 +368,8 @@ npx tsx /path/to/deus/src/orchestrator.ts --kb-stats --cwd .
 | Название | Шаги |
 |----------|------|
 | build | researcher → architect → implementer → reviewer → qa |
-| build-pro | researcher → architect-pro → implementer → reviewer → qa |
+| build-pro | researcher → architect-pro → implementer → reviewer-pro → qa |
+| full-cycle | researcher → architect-pro → reviewer-pro → implementer → reviewer-pro → qa → doc |
 | audit | security → code-reviewer → reviewer |
 | debug | researcher → debug → implementer → qa |
 | docs | researcher → content-writer → reviewer |

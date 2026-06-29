@@ -2,7 +2,7 @@
 
 Multi-agent orchestrator for OpenCode with Knowledge Base, DAG engine, and auto-scaling.
 
-16 specialized agents. SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines).
+17 specialized agents. SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines).
 
 ## Quick Start
 
@@ -25,6 +25,8 @@ On first run, Deus automatically:
 |---------|-------------|
 | `npx tsx src/orchestrator.ts "task"` | LLM conductor picks pipeline and dispatches agents |
 | `--pipeline build "task"` | Static pipeline (researcher → architect → implementer → reviewer → qa) |
+| `--pipeline build-pro "task"` | Pro pipeline (researcher → architect-pro → implementer → reviewer-pro → qa) |
+| `--pipeline full-cycle "task"` | Full high-stakes pipeline (researcher → architect-pro → reviewer-pro → implementer → reviewer-pro → qa → doc) |
 | `--agent implementer-builder "task"` | Single agent |
 | `--parallel "task1" "task2"` | Parallel execution |
 | `--index /path/to/project` | Manual KB indexing |
@@ -42,7 +44,8 @@ opencode serve (HTTP API, port 4096)
 │  ├── researcher-explorer (research)         │
 │  ├── architect-planner* (planning)          │
 │  ├── implementer-builder (implementation)   │
-│  ├── reviewer-critic (review)               │
+│  ├── reviewer-critic (review, standard)      │
+│  ├── reviewer-critic-pro (review, high-stakes)│
 │  ├── integrator-qa (testing)                │
 │  └── 11 other agents                        │
 └─────────────────────────────────────────────┘
@@ -59,6 +62,7 @@ Knowledge Base (SQLite + FTS5)
 |-------|-------|----------|
 | orchestrator-conductor | `deepseek-v4-pro` | `max` |
 | architect-planner-pro | `deepseek-v4-pro` | `max` |
+| reviewer-critic-pro | `deepseek-v4-pro` | `max` |
 | All others | `deepseek-v4-flash` | `max` |
 
 ## Project Structure
