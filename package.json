@@ -1,0 +1,20 @@
+{
+  "name": "agentic-orchestrator-v2",
+  "version": "2.0.0",
+  "description": "SDK-based multi-agent orchestrator for OpenCode",
+  "type": "module",
+  "scripts": {
+    "orchestrator": "tsx src/orchestrator.ts",
+    "demo": "tsx src/orchestrator.ts --demo",
+    "server": "opencode serve --port 4096"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@opencode-ai/sdk": "latest",
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

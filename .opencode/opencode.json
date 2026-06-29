@@ -1,0 +1,56 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/deepseek-v4-flash",
+  "agent": {
+    "orchestrator-conductor": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "architect-planner-pro": {
+      "model": "opencode-go/deepseek-v4-pro",
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "researcher-explorer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "architect-planner": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "implementer-builder": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "reviewer-critic": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "integrator-qa": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "debug": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "doc-maintainer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "content-writer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "data-analyst": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "ux-designer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "code-reviewer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "test-engineer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "security-auditor": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "skills-indexer": {
+      "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    }
+  }
+}
