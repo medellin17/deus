@@ -1,128 +1,102 @@
-# Agentic Orchestrator v2
+# Deus
 
-Multi-agent оркестратор для OpenCode. 16 специализированных агентов, Knowledge Base, автоматическая оркестрация.
+Multi-agent orchestrator for OpenCode with Knowledge Base, DAG engine, and auto-scaling.
 
-## Быстрый старт
+16 specialized agents. SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines).
+
+## Quick Start
 
 ```bash
+git clone https://github.com/medellin17/deus.git
+cd deus
 npm install
-npx tsx src/orchestrator.ts --cwd /path/to/project "задача"
+npx tsx src/orchestrator.ts --cwd /path/to/project "your task"
 ```
 
-При первом запуске автоматически:
-- Копирует `.opencode/` (агенты + конфиг) в целевой проект
-- Запускает `opencode serve` в целевой директории
-- Индексирует проект в Knowledge Base
-- Инжектит контекст перед планированием
+On first run, Deus automatically:
+- Copies `.opencode/` (agents + config) to the target project
+- Spawns `opencode serve` in the target directory
+- Indexes the project into Knowledge Base
+- Injects context before planning
 
-## Режимы работы
+## Modes
 
-| Команда | Что делает |
-|---------|-----------|
-| `npx tsx src/orchestrator.ts "задача"` | LLM-конductor выбирает пайплайн и dispatch-ит агентов |
-| `--pipeline build "задача"` | Фиксированный пайплайн (researcher → architect → implementer → reviewer → qa) |
-| `--agent implementer-builder "задача"` | Один агент |
-| `--parallel "задача1" "задача2"` | Параллельное выполнение |
-| `--index /path/to/project` | Ручная индексация в KB |
-| `--kb-stats` | Статистика Knowledge Base |
+| Command | What it does |
+|---------|-------------|
+| `npx tsx src/orchestrator.ts "task"` | LLM conductor picks pipeline and dispatches agents |
+| `--pipeline build "task"` | Static pipeline (researcher → architect → implementer → reviewer → qa) |
+| `--agent implementer-builder "task"` | Single agent |
+| `--parallel "task1" "task2"` | Parallel execution |
+| `--index /path/to/project` | Manual KB indexing |
+| `--kb-stats` | Knowledge Base statistics |
 
-## Архитектура
+## Architecture
 
 ```
 orchestrator.ts (CLI + SDK)
     ↓
-opencode serve (HTTP API, порт 4096)
+opencode serve (HTTP API, port 4096)
     ↓
 ┌─────────────────────────────────────────────┐
 │  Conductor (orchestrator-conductor)         │
-│  ├── researcher-explorer (исследование)     │
-│  ├── architect-planner* (планирование)     │
-│  ├── implementer-builder (реализация)       │
-│  ├── reviewer-critic (ревью)                │
-│  ├── integrator-qa (тестирование)           │
-│  └── 11 других агентов                      │
+│  ├── researcher-explorer (research)         │
+│  ├── architect-planner* (planning)          │
+│  ├── implementer-builder (implementation)   │
+│  ├── reviewer-critic (review)               │
+│  ├── integrator-qa (testing)                │
+│  └── 11 other agents                        │
 └─────────────────────────────────────────────┘
     ↓
 Knowledge Base (SQLite + FTS5)
-    ├── Авто-индексация проекта
-    ├── Контекст перед планированием
-    └── Память между сессиями
+    ├── Auto-indexing
+    ├── Context injection before planning
+    └── Memory across sessions
 ```
 
-## Модели
+## Models
 
-| Агент | Модель | Thinking |
-|-------|--------|----------|
+| Agent | Model | Thinking |
+|-------|-------|----------|
 | orchestrator-conductor | `deepseek-v4-pro` | `max` |
 | architect-planner-pro | `deepseek-v4-pro` | `max` |
-| Остальные 14 | `deepseek-v4-flash` | `max` |
-
-## Структура
-
-```
-agentic-orchestrator-v2/
-├── .opencode/
-│   ├── opencode.json        # Модели + thinking
-│   ├── agents/              # 16 агентов (.md промпты)
-│   └── skills/              # 23 skills
-├── src/
-│   ├── orchestrator.ts      # Основной скрипт
-│   └── kb/                  # Knowledge Base
-│       ├── schema.ts        # SQLite схема
-│       ├── chunker.ts       # Чанкинг по Markdown заголовкам
-│       ├── fts5.ts          # Keyword поиск
-│       ├── embeddings.ts    # Gemini embeddings (3072 dim)
-│       ├── memory-tree.ts   # Иерархические саммари
-│       ├── search.ts        # Гибридный поиск
-│       ├── super-context.ts # Авто-инжект контекста
-│       ├── indexer.ts       # Индексация файлов
-│       └── index.ts         # Public API
-├── package.json
-└── tsconfig.json
-```
-
-## Автоматика
-
-| Что | Как |
-|-----|-----|
-| Копирование `.opencode/` | Автоматически при `--cwd` |
-| Запуск `opencode serve` | Автоматически (auto-spawn) |
-| Индексация проекта | Автоматически если KB пуста |
-| Инжект контекста | Автоматически перед планированием |
-| Сохранение результатов | Автоматически в memory tree |
+| All others | `deepseek-v4-flash` | `max` |
 
 ## Knowledge Base
 
-- **FTS5** — keyword поиск (BM25, zero dependencies)
-- **Memory Tree** — иерархические саммари (file/module/project)
-- **SuperContext** — авто-генерация контекста для задач
-- **Per-project** — каждый проект имеет свою БД (`.agents/orchestrator.db`)
+- **FTS5** — keyword search (BM25, zero dependencies)
+- **Memory Tree** — hierarchical summaries (file/module/project)
+- **SuperContext** — auto-context generation for tasks
+- **Per-project** — each project has its own DB (`.agents/orchestrator.db`)
 
-### Таблицы
+### Tables
 
-| Таблица | Назначение |
-|---------|-----------|
-| `kb_documents` | Индексированные файлы |
-| `kb_chunks` | Семантические чанки |
-| `kb_chunks_fts` | FTS5 индекс |
-| `kb_embeddings` | Векторные эмбеддинги |
-| `kb_memory_tree` | Иерархические саммари |
+| Table | Purpose |
+|-------|---------|
+| `kb_documents` | Indexed files |
+| `kb_chunks` | Semantic chunks |
+| `kb_chunks_fts` | FTS5 index |
+| `kb_embeddings` | Vector embeddings |
+| `kb_memory_tree` | Hierarchical summaries |
 
-## Переменные окружения
+## Environment
 
-| Переменная | Назначение |
-|------------|-----------|
-| `OPENCODE_URL` | URL сервера (по умолчанию: `http://localhost:4096`) |
-| `GEMINI_API_KEY` | Ключ для Gemini embeddings (для RAG) |
+| Variable | Purpose |
+|----------|---------|
+| `OPENCODE_URL` | Server URL (default: `http://localhost:4096`) |
+| `GEMINI_API_KEY` | Gemini embeddings key (optional, for RAG) |
 
-## Добавление агента
+## Adding an Agent
 
-1. Создать `.opencode/agents/{name}.md`
-2. Добавить в `VALID_AGENTS` в `src/orchestrator.ts`
-3. Добавить в `.opencode/opencode.json` (если нужна своя модель)
+1. Create `.opencode/agents/{name}.md`
+2. Add to `VALID_AGENTS` in `src/orchestrator.ts`
+3. Add to `.opencode/opencode.json` (if custom model needed)
 
-## Требования
+## Requirements
 
 - Node.js 20+
 - OpenCode CLI (`npm i -g opencode`)
-- `GEMINI_API_KEY` (опционально, для embeddings)
+- `GEMINI_API_KEY` (optional, for embeddings)
+
+## License
+
+Apache 2.0
