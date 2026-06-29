@@ -11,7 +11,8 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@opencode-ai/sdk": "latest",
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^12.11.1",
+    "smart-context-retrieving": "file:../smart-context-retrieving"
   },
   "devDependencies": {
     "tsx": "^4.0.0",

@@ -10,10 +10,14 @@ export default tool({
   },
   async execute(args) {
     const top = args.top || 10
-    const result = execSync(
-      `npx code-assistant ask "${args.query}" "${args.project}" --top ${top}`,
-      { encoding: "utf-8", timeout: 15000 }
-    )
-    return result
+    try {
+      const result = execSync(
+        `npx code-assistant ask "${args.query}" "${args.project}" --top ${top}`,
+        { encoding: "utf-8", timeout: 15000 }
+      )
+      return result
+    } catch (err: any) {
+      return `search-code tool unavailable: smart-context-retrieving not installed. Install from local path or use grep/search instead.\nError: ${err.message}`
+    }
   },
 })
