@@ -3,7 +3,12 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const BATCH_SIZE = 100;
 const EMBEDDING_DIMENSION = 3072;
 
-export class EmbeddingService {
+export interface Embedder {
+  embed(texts: string[]): Promise<number[][]>;
+  embedSingle(text: string): Promise<number[]>;
+}
+
+export class EmbeddingService implements Embedder {
   private genAI: GoogleGenerativeAI;
   private modelName: string;
 

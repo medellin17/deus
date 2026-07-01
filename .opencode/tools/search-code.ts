@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { execSync } from "child_process"
+import { spawnSync } from "child_process"
 
 export default tool({
   description: "Search project code using BM25 + Symbol Graph + Graph Walk. Use before reading or editing code to find relevant files.",
@@ -11,11 +11,14 @@ export default tool({
   async execute(args) {
     const top = args.top || 10
     try {
-      const result = execSync(
-        `npx code-assistant ask "${args.query}" "${args.project}" --top ${top}`,
-        { encoding: "utf-8", timeout: 15000 }
-      )
-      return result
+      const result = spawnSync("npx", ["code-assistant", "ask", args.query, args.project, "--top", String(top)], {
+        encoding: "utf-8",
+        timeout: 15000,
+        shell: false,
+      })
+      if (result.error) throw result.error
+      if (result.status !== 0) throw new Error(`search-code failed with status ${result.status}: ${result.stderr}`)
+      return result.stdout
     } catch (err: any) {
       return `search-code tool unavailable: smart-context-retrieving not installed. Install from local path or use grep/search instead.\nError: ${err.message}`
     }

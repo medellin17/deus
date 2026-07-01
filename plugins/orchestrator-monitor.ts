@@ -1,4 +1,5 @@
-import type { Plugin } from "@opencode-ai/plugin"
+/** Local type: OpenCode plugin interface (package @opencode-ai/plugin unavailable) */
+type Plugin = (ctx: unknown) => Promise<Record<string, (event: unknown) => Promise<void>>>
 
 /** Possible statuses for a monitored session */
 type SessionStatus = "active" | "completed" | "errored" | "failed"

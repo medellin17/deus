@@ -15,6 +15,8 @@
     "smart-context-retrieving": "file:../smart-context-retrieving"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.1.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }

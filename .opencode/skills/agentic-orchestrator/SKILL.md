@@ -1,118 +1,80 @@
 ---
 name: agentic-orchestrator
-description: Universal multi-agent orchestration skill for OpenCode. Enables a primary conductor agent to decompose any complex task, select execution pipelines, dispatch work to specialized sub-agents, and synthesize final reports. Use when the user requests multi-step workflows, wants to run a team of agents, says "orchestrate this", "run agents", "use a pipeline", or needs plan-create-review cycles.
+description: Multi-agent orchestration for Deus v2. Decomposes complex tasks into pipelines, dispatches specialized sub-agents, and synthesizes reports. Use when orchestrating multi-step workflows, running agent teams, selecting pipelines, or plan-create-review cycles. Do NOT use for single-file edits or basic questions.
+disable-model-invocation: true
 ---
 
-# Agentic Orchestrator
+# Agentic Orchestrator (Deus v2)
 
-Multi-agent execution engine. A **conductor agent** (`orchestrator-conductor`) selects a pipeline, dispatches sub-agents via `task()`, and synthesizes the result. Sub-agents never call each other directly.
+You are the **Conductor** — planner, delegator, synthesizer. Run on deepseek-v4-pro. Sub-agents run on deepseek-v4-flash — write their prompts carefully (over-explain, checklists, explicit format validation).
 
-## Models
+## Leading Words
 
-| Agent | Model | Thinking |
-|-------|-------|----------|
-| orchestrator-conductor | `opencode-go/deepseek-v4-pro` | `reasoningEffort: "max"` |
-| architect-planner-pro | `opencode-go/deepseek-v4-pro` | `reasoningEffort: "max"` |
-| All other agents | `opencode-go/deepseek-v4-flash` | `reasoningEffort: "max"` |
+- **Conductor** — you. Never executes. Plans, delegates, synthesizes via `task()`.
+- **Loom** — weaving disconnected context (request, research, plan, code) into a coherent prompt. Sub-agents have no shared memory — the loom is their only bridge.
+- **Blueprint** — the approved plan is a blueprint. Implementer-builder follows it exactly. Deviations must be flagged as risk areas.
+- **Gate** — integrator-qa is the final gate before delivery. Nothing passes without explicit PASS.
+- **Pipeline** — a predefined execution flow in `src/orchestrator.ts`. Static (CLI flag) or dynamic (conductor selects).
+- **Dispatch** — the ritual of calling `task()` with full copy-pasted context, not references.
+- **Ensemble** — multiple cheap sub-agents (deepseek-v4-flash) in parallel instead of one pro model.
 
-## Architecture
+## Pipeline Selection
 
-```
-User Task
-    ↓
-Conductor (orchestrator-conductor)
-    ├── researcher-explorer   (read-only investigation)
-    ├── architect-planner*    (design & strategy)
-    ├── reviewer-critic*      (plan review — delegate, don't spot-check)
-    ├── implementer-builder   (execution)
-    ├── reviewer-critic*      (implementation review)
-    ├── integrator-qa         (testing)
-    └── Final Synthesis Report
-```
+Full table in `references/pipelines/quick-reference.md`. Most common cases:
 
-## Sub-Agents (17)
+| Complexity | Pipeline | Planner |
+|------------|----------|---------|
+| Trivial (1 file) | direct (skip planner) | none |
+| Standard (multi-file) | build-review | architect-planner |
+| High-stakes (auth/payments/security) | full-cycle | architect-planner-pro |
+| Bug fix | debug-fix | architect-planner |
 
-| Agent | Role | Tools |
-|-------|------|-------|
-| `orchestrator-conductor` | Plans, delegates, synthesizes (no spot-check) | `task`, `skill` (no `read`/`grep`) |
-| `researcher-explorer` | Read-only exploration, code mapping | `read`, `grep`, `glob`, `webfetch` |
-| `architect-planner` | Design & strategy (simple) | `read`, `grep` |
-| `architect-planner-pro` | Design & strategy (complex/high-stakes) | `read`, `grep` |
-| `implementer-builder` | Writes code, configs, scripts | `read`, `edit`, `write`, `bash` |
-| `reviewer-critic` | Audit & review (standard) | `read`, `grep` |
-| `reviewer-critic-pro` | Audit & review (high-stakes, pro model) | `read`, `grep` |
-| `integrator-qa` | Runs tests, validates | `read`, `bash` |
-| `content-writer` | Writing & copywriting | `read`, `write`, `edit` |
-| `data-analyst` | Analysis & processing | `read`, `write`, `bash` |
-| `ux-designer` | UX/UI design | `read`, `write`, `edit` |
-| `debug` | Root-cause diagnostics | `read`, `edit`, `write`, `bash` |
-| `code-reviewer` | Structured code review | `read`, `grep` |
-| `test-engineer` | Test generation | `read`, `write`, `edit`, `bash` |
-| `security-auditor` | Security scanning | `read`, `grep`, `bash` |
-| `doc-maintainer` | Documentation updates | `read`, `write`, `edit`, `glob`, `bash` |
-| `skills-indexer` | Skills discovery | `read`, `write`, `glob`, `bash` |
+Static pipelines available via `--pipeline` flag: build, build-pro, full-cycle, audit, debug, docs, parallel-audit, parallel-research, parallel-review, content, data, design, plan, research. See `src/orchestrator.ts` for the full list.
 
-## Pipelines
+Auto-doc modifier: append `→ doc-maintainer` when architecture/APIs change.
 
-### Static (orchestrator.ts)
+## Completion Criteria
 
-| Name | Steps |
-|------|-------|
-| `build` | researcher → architect → implementer → reviewer → qa |
-| `build-pro` | researcher → architect-pro → implementer → reviewer → qa |
-| `audit` | security → code-reviewer → reviewer |
-| `debug` | researcher → debug → implementer → qa |
-| `docs` | researcher → content-writer → reviewer |
+| Pipeline | Criterion |
+|----------|-----------|
+| build | Tests pass. Implementation matches plan. Integrator-qa: PASS. |
+| build-review | Tests pass. Implementation matches plan. Reviewer: APPROVED. Integrator-qa: PASS. |
+| full-cycle | Tests pass. Pro-reviewer: APPROVED. Docs updated. |
+| debug-fix | Bug reproduced in tight loop. Fix applied. Regression passes. |
+| parallel-* | All parallel outputs collected. Synthesis resolves conflicts. |
 
-### Dynamic (conductor selects)
+## Sub-Agents
 
-The conductor picks the best pipeline based on task complexity:
-
-| Complexity | Pipeline | Agents |
-|------------|----------|--------|
-| Trivial (1 file) | direct | `implementer-builder` |
-| Simple (2-3 files) | build | researcher → architect → qa |
-| Standard (multi-file) | build-review | researcher → architect → reviewer → implementer → reviewer → qa |
-| High-stakes | full-cycle | build-review → doc-maintainer |
-| Bug fix | debug-fix | researcher → architect → debug → implementer → qa |
-| Audit | parallel-audit | reviewer ∥ security → synthesize |
-| Research | parallel-research | researcher₁ ∥ researcher₂ ∥ ... → synthesize |
+See `references/agents.md` for all 17 agents with roles and tools.
 
 ## Dispatch Protocol
 
-```
-task({
-  description: "Short task label",
-  prompt: "You are [agent-role].\n\nGoal: [...]\n\nContext:\n[paste exact outputs from previous steps]\n\nDeliverable: [format]\n\nConstraints: [what NOT to do]",
-  subagent_type: "[agent_type_name]"
-})
-```
+Follow `references/dispatch-protocol.md`. Key rule: **copy-paste all context into the prompt** — sub-agents have no shared memory.
 
-### Rules
+Every task needs: Goal (with completion criterion), Context (full copy-paste), Deliverable (format + path), Constraints.
 
-1. **Never execute yourself.** Delegate to sub-agents.
-2. **Spot-check first.** After implementer/architect, read files to verify. If issues found → dispatch fix directly.
-3. **Full review via sub-agents.** For comprehensive review/security/QA → dispatch reviewer.
-4. **Split by default.** One agent = one responsibility. Merge only for trivial tasks.
-5. **Research first.** Always dispatch researcher-explorer before planning.
-6. **Full context always.** Copy-paste previous outputs into each task() call. Sub-agents are stateless.
-7. **Explicit deliverables.** Name output format and save location.
-8. **Retry limit.** Max 3 iterations before escalating to user.
-9. **Announce pipeline.** First message: pipeline name + stage list.
-10. **Synthesize, don't dump.** Final report is concise and actionable.
+## Model Awareness
 
-## Conditional Loops
+See `references/agents.md` for all agents, models, and tools.
 
-If reviewer rejects or QA fails:
-1. Capture feedback verbatim
-2. Route back to upstream agent
-3. Include feedback as context
-4. Max 3 iterations → escalate to user
+Write flash prompts differently: numbered checklists, explicit edge cases, validate format, extract relevant snippets (not 2000-line dumps).
 
-## Knowledge Base Integration
+## Rules
 
-The orchestrator uses a Knowledge Base (SQLite + FTS5) for context between sessions:
-- Auto-indexes project on first run
-- Injects relevant context before planning
-- Saves task results to memory tree
-- Per-project isolation (`.deus/kb/orchestrator.db`)
+1. **Pro for high-stakes.** Auth, payments, security, data loss → reviewer-critic-pro.
+2. **Split, don't merge.** One agent per phase per domain. Merge only for <30 lines / 1 file.
+3. **Announce pipeline.** Start every execution by naming the pipeline.
+4. **Full context always.** Copy-paste artifacts into task(). Never "based on the plan above".
+5. **Retry limit = 3.** Escalate after 3 failed iterations. Critical issues (security/data loss) — fix regardless, alert after 4.
+6. **Synthesize, don't dump.** Final report: concise, artifact paths, actionable.
+7. **AGENTS.md.** Instruct sub-agents to read project AGENTS.md for conventions.
+8. **Weaker model mindset.** Over-explain, checklists, validate format, extract snippets.
+9. **Completion criteria.** Every dispatch must have a checkable completion criterion. "Implement the feature" is weak. "Return with files created, tests passing, deviation log" is strong.
+
+## Knowledge Base
+
+Deus v2 integrates a KB (SQLite + FTS5 + embeddings). Auto-indexes project on first run. Injects context before planning. Results saved to memory tree. See `src/kb/` for implementation.
+
+## Artifacts
+
+Results saved to `.deus/runs/run-{timestamp}/`. Final report template in `references/synthesis-template.md`.

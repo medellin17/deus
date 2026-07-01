@@ -1,7 +1,10 @@
 import Database from "better-sqlite3";
+import type { Embedder } from "./embeddings.js";
+import { cosineSimilarity } from "./embeddings.js";
+import { escapeFts } from "./fts5.js";
 
 export interface SearchResult {
-  source: "fts5" | "memory" | "both";
+  source: "fts5" | "memory" | "both" | "semantic";
   path?: string;
   heading?: string;
   content: string;
@@ -10,9 +13,11 @@ export interface SearchResult {
 
 export class HybridSearch {
   private db: Database.Database;
+  private embedder?: Embedder;
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, embedder?: Embedder) {
     this.db = db;
+    this.embedder = embedder;
   }
 
   search(query: string, limit: number = 10): SearchResult[] {
@@ -43,7 +48,7 @@ export class HybridSearch {
   }
 
   searchChunks(query: string, limit: number = 10): SearchResult[] {
-    const ftsQuery = this.escapeFts(query);
+    const ftsQuery = escapeFts(query);
     const stmt = this.db.prepare(
       "SELECT rowid, content, heading, rank FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ? ORDER BY rank LIMIT ?"
     );
@@ -62,9 +67,10 @@ export class HybridSearch {
   }
 
   searchMemory(query: string, limit: number = 10): SearchResult[] {
-    const pattern = `%${query}%`;
+    const escaped = query.replace(/[%_]/g, "\\$&");
+    const pattern = `%${escaped}%`;
     const stmt = this.db.prepare(
-      "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? OR path LIKE ? LIMIT ?"
+      "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' LIMIT ?"
     );
     const rows = stmt.all(pattern, pattern, limit) as {
       path: string;
@@ -78,7 +84,49 @@ export class HybridSearch {
     }));
   }
 
-  private escapeFts(query: string): string {
-    return `"${query.replace(/["*()]/g, "")}"`;
+  async semanticSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
+    if (!this.embedder) return [];
+
+    // gemini-embedding-2: Query prefix format
+    const prefixedQuery = `task: search result | query: ${query}`;
+    const queryEmbedding = await this.embedder.embedSingle(prefixedQuery);
+
+    const rows = this.db.prepare(`
+      SELECT e.chunk_id, e.embedding, e.dimension,
+             c.content, c.heading,
+             d.path
+      FROM kb_embeddings e
+      JOIN kb_chunks c ON c.id = e.chunk_id
+      JOIN kb_documents d ON d.id = c.doc_id
+      WHERE e.model = 'gemini-embedding-2'
+    `).all() as {
+      chunk_id: number;
+      embedding: Buffer;
+      dimension: number;
+      content: string;
+      heading: string | null;
+      path: string;
+    }[];
+
+    const scored: SearchResult[] = [];
+    for (const row of rows) {
+      const floatArray = new Float32Array(
+        row.embedding.buffer,
+        row.embedding.byteOffset,
+        row.embedding.byteLength / 4
+      );
+      const storedVector = Array.from(floatArray);
+      const score = cosineSimilarity(queryEmbedding, storedVector);
+      scored.push({
+        source: "semantic",
+        path: row.path,
+        heading: row.heading || undefined,
+        content: row.content,
+        rank: 1 - score, // lower = better (0 = perfect match)
+      });
+    }
+
+    scored.sort((a, b) => a.rank - b.rank);
+    return scored.slice(0, limit);
   }
 }

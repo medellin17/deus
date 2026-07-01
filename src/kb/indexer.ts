@@ -2,6 +2,8 @@ import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { chunkMarkdown } from "./chunker.js";
+import type { Embedder } from "./embeddings.js";
 
 const SKIP_DIRS = ["node_modules", ".git", "dist", "build", ".next", "__pycache__"];
 
@@ -9,9 +11,11 @@ const DEFAULT_EXTENSIONS = [".md", ".txt", ".ts", ".tsx", ".js", ".jsx", ".py", 
 
 export class KBIndexer {
   private db: Database.Database;
+  private embedder?: Embedder;
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, embedder?: Embedder) {
     this.db = db;
+    this.embedder = embedder;
   }
 
   indexFile(filePath: string): void {
@@ -26,7 +30,14 @@ export class KBIndexer {
       return;
     }
 
-    const chunks = this.chunkContent(content);
+    const rawChunks = chunkMarkdown(content);
+    const chunks = rawChunks.map((c, i) => ({
+      index: i,
+      heading: c.heading,
+      level: c.level,
+      text: c.content,
+      tokens: c.tokenCount,
+    }));
 
     if (existing) {
       this.db.prepare("DELETE FROM kb_chunks WHERE doc_id = ?").run(existing.id);
@@ -103,40 +114,57 @@ export class KBIndexer {
     return { documents, chunks, embeddings };
   }
 
-  private chunkContent(content: string): { index: number; heading: string; level: number; text: string; tokens: number }[] {
-    const lines = content.split("\n");
-    const chunks: { index: number; heading: string; level: number; text: string; tokens: number }[] = [];
-    let currentLines: string[] = [];
-    let chunkIndex = 0;
-    let currentHeading = "";
-    let currentLevel = 0;
+  async generateEmbeddings(batchSize: number = 100): Promise<number> {
+    if (!this.embedder) return 0;
 
-    const flush = () => {
-      if (currentLines.length === 0) return;
-      const text = currentLines.join("\n").trim();
-      if (text.length > 0) {
-        chunks.push({
-          index: chunkIndex++,
-          heading: currentHeading,
-          level: currentLevel,
-          text,
-          tokens: Math.ceil(text.length / 4),
-        });
-      }
-      currentLines = [];
-    };
+    let totalProcessed = 0;
+    let hasMore = true;
 
-    for (const line of lines) {
-      const headerMatch = line.match(/^(#{1,3})\s+(.+)/);
-      if (headerMatch) {
-        flush();
-        currentLevel = headerMatch[1].length;
-        currentHeading = headerMatch[2];
+    while (hasMore) {
+      const rows = this.db.prepare(`
+        SELECT c.id, c.content, c.heading
+        FROM kb_chunks c
+        WHERE NOT EXISTS (SELECT 1 FROM kb_embeddings e WHERE e.chunk_id = c.id)
+        LIMIT ?
+      `).all(batchSize) as { id: number; content: string; heading: string | null }[];
+
+      if (rows.length === 0) {
+        hasMore = false;
+        break;
       }
-      currentLines.push(line);
+
+      // gemini-embedding-2: Document prefix format
+      const texts = rows.map(r => {
+        const heading = r.heading || "none";
+        return `title: ${heading} | text: ${r.content}`;
+      });
+
+      let embeddings: number[][];
+      try {
+        embeddings = await this.embedder.embed(texts);
+      } catch (err) {
+        console.error(`[indexer] Ошибка генерации эмбеддингов для батча: ${err}`);
+        break;
+      }
+
+      const insertStmt = this.db.prepare(`
+        INSERT INTO kb_embeddings (chunk_id, model, dimension, embedding, created_at)
+        VALUES (?, ?, ?, ?, unixepoch())
+      `);
+
+      const insertAll = this.db.transaction(() => {
+        for (let i = 0; i < rows.length; i++) {
+          const vector = embeddings[i];
+          if (!vector) continue;
+          const buffer = Buffer.from(new Float32Array(vector).buffer);
+          insertStmt.run(rows[i].id, "gemini-embedding-2", vector.length, buffer);
+        }
+      });
+
+      insertAll();
+      totalProcessed += rows.length;
     }
 
-    flush();
-    return chunks;
+    return totalProcessed;
   }
 }

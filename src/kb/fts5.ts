@@ -7,6 +7,10 @@ export interface FTS5Result {
   rank: number;
 }
 
+export function escapeFts(query: string): string {
+  return `"${query.replace(/"/g, '""').replace(/\b(AND|OR|NOT|NEAR)\b/gi, '').replace(/[*()]/g, '')}"`;
+}
+
 export class FTS5Index {
   private db: Database.Database;
 
@@ -15,12 +19,11 @@ export class FTS5Index {
   }
 
   search(query: string, limit: number = 10): FTS5Result[] {
-    const escaped = query.replace(/["]/g, '""');
     const rows = this.db
       .prepare(
         `SELECT rowid, content, heading, rank FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ? ORDER BY rank LIMIT ?`
       )
-      .all(`"${escaped}"`, limit) as Array<{
+      .all(escapeFts(query), limit) as Array<{
       rowid: number;
       content: string;
       heading: string;

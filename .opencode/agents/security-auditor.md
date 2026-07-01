@@ -3,7 +3,14 @@ description: Security engineer focused on vulnerability detection, threat modeli
 mode: all
 color: "#e53935"
 permission:
-  "*": allow
+  read: allow
+  grep: allow
+  glob: allow
+  write: deny
+  edit: deny
+  bash: deny
+  task: deny
+  skill: allow
 ---
 
 # Security Auditor

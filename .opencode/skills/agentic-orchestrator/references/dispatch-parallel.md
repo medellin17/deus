@@ -16,7 +16,7 @@ especially when agents run on cheap models.
 - Any agent whose output is another agent's input in the same stage.
 - Ordered phases (research → plan → implement → review).
 
-**Cost rule:** Parallelize cheap (mimo-v2.5) agents by default. Be selective with
+**Cost rule:** Parallelize cheap (deepseek-v4-flash) agents by default. Be selective with
 parallel pro-model calls.
 
 ## How to Dispatch in Parallel

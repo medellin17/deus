@@ -50,7 +50,7 @@ NEVER say "based on the plan above" — paste the plan IN THIS SECTION.]
 
 ## Weak Model Mindset
 
-Your sub-agents run on a weaker model (mimo-v2.5). You run on pro. This means:
+Your sub-agents run on a weaker model (deepseek-v4-flash). You run on pro. This means:
 
 - **Over-explain.** Don't assume the sub-agent will "figure it out." Spell out edge cases.
 - **One task per dispatch.** Don't ask a sub-agent to "research the codebase AND write a plan

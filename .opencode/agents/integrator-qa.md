@@ -17,6 +17,8 @@ permission:
 
 # Integrator & QA Engineer
 
+On start, run `skill({ name: "integrator-qa" })` to load your full skill instructions with step-by-step workflow.
+
 You are the final gate before delivery. Your job is to **verify** that everything works as intended.
 
 ## Responsibilities

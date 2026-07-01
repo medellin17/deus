@@ -1,15 +1,13 @@
 # Dispatch Templates
 
-This folder contains `task()` dispatch templates for different orchestration cases.
-Pick the one that matches your current dispatch:
+## All Templates
 
-| Template | Use when |
-|----------|----------|
-| [`dispatch-simple.md`](dispatch-simple.md) | Default case: any single sub-agent call on a weak model. Includes prompt structure, weak-model mindset, and basic examples. |
-| [`dispatch-pro-planner.md`](dispatch-pro-planner.md) | Dispatching `architect-planner-pro`. Requires a curated Context Brief. |
-| [`dispatch-parallel.md`](dispatch-parallel.md) | Launching multiple independent sub-agents simultaneously (cheap models only). |
+| Template | When to Use | Agent Type |
+|----------|-------------|------------|
+| `dispatch-simple.md` | Default single-agent dispatch on weak models. | Any |
+| `dispatch-pro-planner.md` | Dispatching `architect-planner-pro` with curated Context Brief. | architect-planner-pro |
+| `dispatch-parallel.md` | Launching multiple cheap agents in parallel. | Any (parallel) |
+| `dispatch-parallel-plan.md` | Two `architect-planner` with different angles for divergent proposals. | architect-planner (x2) |
+| `dispatch-iterative-plan.md` | Multi-pass plan: architect-planner → parallel review → refine → sign-off. Max 2 iterations. | architect-planner, reviewer-critic, security-auditor, code-reviewer |
 
-**Rule of thumb:**
-- One cheap agent → `dispatch-simple.md`.
-- Pro planner → `dispatch-pro-planner.md`.
-- Multiple cheap agents in parallel → `dispatch-parallel.md`.
+Use `dispatch-simple.md` as the base template. Others extend it.

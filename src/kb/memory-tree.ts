@@ -24,7 +24,10 @@ export class MemoryTree {
   ): void {
     this.db
       .prepare(
-        "INSERT OR REPLACE INTO kb_memory_tree(path, level, summary, token_count) VALUES(?, ?, ?, ?)"
+        `INSERT INTO kb_memory_tree(path, level, summary, token_count) VALUES(?, ?, ?, ?)
+         ON CONFLICT(path, level) DO UPDATE SET
+           summary = excluded.summary,
+           token_count = excluded.token_count`
       )
       .run(path, level, summary, tokenCount ?? null);
   }
@@ -78,10 +81,11 @@ export class MemoryTree {
   }
 
   search(query: string, limit?: number): MemoryNode[] {
-    const like = `%${query}%`;
+    const escaped = query.replace(/[%_]/g, "\\$&");
+    const like = `%${escaped}%`;
     const rows = this.db
       .prepare(
-        "SELECT * FROM kb_memory_tree WHERE summary LIKE ? OR path LIKE ? LIMIT ?"
+        "SELECT * FROM kb_memory_tree WHERE summary LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' LIMIT ?"
       )
       .all(like, like, limit ?? 100) as {
       id: number;

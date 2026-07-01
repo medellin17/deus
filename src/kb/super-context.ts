@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { escapeFts } from "./fts5.js";
 
 export class SuperContext {
   private db: Database.Database;
@@ -12,18 +13,19 @@ export class SuperContext {
       .prepare(
         "SELECT rowid, content, heading, rank FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ? ORDER BY rank LIMIT 5"
       )
-      .all(task) as Array<{
+      .all(escapeFts(task)) as Array<{
       rowid: number;
       content: string;
       heading: string;
       rank: number;
     }>;
 
+    const escapedTask = task.replace(/[%_]/g, "\\$&");
     const summaries = this.db
       .prepare(
-        "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? LIMIT 5"
+        "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? ESCAPE '\\' LIMIT 5"
       )
-      .all(`%${task}%`) as Array<{ path: string; summary: string }>;
+      .all(`%${escapedTask}%`) as Array<{ path: string; summary: string }>;
 
     const projectSummary = this.db
       .prepare(

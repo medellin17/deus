@@ -93,6 +93,9 @@ function chunkSection(heading: string, level: number, body: string, maxTokens: n
 }
 
 function chunkMarkdown(content: string, maxTokens: number = 3000): Chunk[] {
+  if (!content || content.trim().length === 0) {
+    return [];
+  }
   const sections = splitByHeaders(content);
   const chunks: Chunk[] = [];
 
