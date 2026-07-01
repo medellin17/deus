@@ -269,7 +269,7 @@ async function ensureServerRunning(baseUrl: string, cwd?: string): Promise<void>
 
   const serverCwd = cwd || DEFAULT_CWD;
   log("INFO", `Запуск opencode serve в ${serverCwd}...`);
-  serverProcess = spawn("opencode", ["serve", "--port", "4096"], {
+  serverProcess = spawn("npx", ["opencode", "serve", "--port", "4096"], {
     stdio: "pipe",
     detached: false,
     cwd: serverCwd,
@@ -335,11 +335,6 @@ function copyOpenCodeToTarget(targetDir: string): void {
   const sourceDir = path.join(__dirname, "..", ".opencode");
   const destDir = path.join(targetDir, ".opencode");
 
-  if (fs.existsSync(destDir)) {
-    log("INFO", `.opencode/ уже существует в ${targetDir}`);
-    return;
-  }
-
   log("INFO", `Копирование .opencode/ в ${targetDir}...`);
   fs.mkdirSync(destDir, { recursive: true });
 
@@ -400,12 +395,23 @@ function installSmartContext(targetDir: string): void {
   log("INFO", `Установка Smart Context из ${smartContextDir}...`);
 
   try {
-    const result = spawnSync("npm", ["install", "--ignore-scripts", smartContextDir], {
+    let result = spawnSync("npm", ["install", "--ignore-scripts", smartContextDir], {
       cwd: targetDir,
       stdio: "pipe",
       timeout: 60000,
       shell: false,
     });
+
+    if (result.error?.code === "ENOENT") {
+      log("WARN", "npm не найден, пробуем через npx...");
+      result = spawnSync("npx", ["-y", "npm", "install", "--ignore-scripts", smartContextDir], {
+        cwd: targetDir,
+        stdio: "pipe",
+        timeout: 60000,
+        shell: false,
+      });
+    }
+
     if (result.error) throw result.error;
     if (result.status !== 0) {
       console.warn(`[warn] npm install smart-context-retrieving exit code: ${result.status}`);

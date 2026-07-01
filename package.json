@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
-    "@opencode-ai/sdk": "latest",
+    "@opencode-ai/sdk": "^1.17.13",
     "better-sqlite3": "^12.11.1",
     "smart-context-retrieving": "file:../smart-context-retrieving"
   },

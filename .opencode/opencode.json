@@ -3,7 +3,7 @@
   "model": "opencode-go/deepseek-v4-flash",
   "agent": {
     "orchestrator-conductor": {
-      "model": "opencode-go/deepseek-v4-pro",
+      "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
     },
     "architect-planner-pro": {

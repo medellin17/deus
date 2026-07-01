@@ -121,3 +121,4 @@ Deus v2 auto-indexes the project into SQLite+KB on first run with `--cwd`. Relev
 10. **AGENTS.md.** Instruct sub-agents to read it.
 
 For full dispatch details, agent tables, execution control, and report template — load the `agentic-orchestrator` skill.
+

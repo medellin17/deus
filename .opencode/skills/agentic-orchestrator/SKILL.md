@@ -75,6 +75,45 @@ Write flash prompts differently: numbered checklists, explicit edge cases, valid
 
 Deus v2 integrates a KB (SQLite + FTS5 + embeddings). Auto-indexes project on first run. Injects context before planning. Results saved to memory tree. See `src/kb/` for implementation.
 
+## Domain Skills
+
+Помимо суб-агентов, в проекте есть доменные скиллы. Загружай их через `skill()` когда задача соответствует описанию.
+
+### Документация
+| Скилл | Когда |
+|-------|-------|
+| `doc-scaffold` | Создать каркас документации |
+| `doc-audit` | Проверить состояние документации |
+| `doc-pruner` | Найти и удалить устаревшую доку |
+| `doc-update` | Обновить доку после изменений кода |
+| `doc-transfer` | Скопировать фреймворк доку в целевой проект |
+
+### Планирование
+| Скилл | Когда |
+|-------|-------|
+| `plan-creator` | Создать план с нуля |
+| `plan-reviewer` | 5-проходное ревью плана |
+| `plan-refiner` | Доработать план по замечаниям |
+| `plan-intent-validator` | Проверить что план соответствует задаче |
+
+### Ревью и безопасность
+| Скилл | Когда |
+|-------|-------|
+| `code-verifier` | Сверить код с планом |
+| `commit-reviewer` | Ревью коммитов |
+| `deep-auditor` | Аудит архитектуры |
+| `peer-reviewer` | Контрастный анализ |
+| `project-code-auditor` | Ревью всей кодовой базы |
+| `white-box-review-runner` | White-box code review |
+| `architecture-security-reviewer` | Threat modeling |
+| `security-prompt-crafter` | Policy-safe промпты |
+| `multi-agent-scanner` | Аудит через суб-агентов |
+
+### Архитектура
+| Скилл | Когда |
+|-------|-------|
+| `architecture-update` | Обновить knowledge/architecture.md |
+
 ## Artifacts
 
 Results saved to `.deus/runs/run-{timestamp}/`. Final report template in `references/synthesis-template.md`.
