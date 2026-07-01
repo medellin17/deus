@@ -22,6 +22,7 @@ import { fileURLToPath } from "url";
 import { createKB, type KbProvider } from "./kb/index.js";
 import { CheckpointManager } from "./kb/checkpoint.js";
 import type { CheckpointState, CompletedDispatch, PendingDispatch } from "./kb/checkpoint.js";
+import type { SubOrchestratorReport, SubOrchestratorConfig } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1327,6 +1328,167 @@ async function executeMode(
     default:
       throw new Error(`Unsupported mode: ${mode}`);
   }
+}
+
+// ─── Sub-Orchestrator ─────────────────────────────────────────────────────
+
+const SUB_ORCHESTRATOR_TIMEOUT = 5 * 60 * 1000; // 5 min
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function tryParseReport(text: string, domain: string, depth: number): SubOrchestratorReport | null {
+  // Ищем блок ```json ... ``` или просто JSON в тексте
+  const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
+    ?? text.match(/(\{[\s\S]*?"stages"[\s\S]*?"domain"[\s\S]*?\})/);
+
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[1]);
+    return {
+      domain: parsed.domain ?? domain,
+      depth: parsed.depth ?? depth,
+      status: parsed.status ?? "complete",
+      stages: parsed.stages ?? [],
+      escalations: parsed.escalations ?? [],
+      total_files_created: parsed.total_files_created ?? 0,
+      total_files_modified: parsed.total_files_modified ?? 0,
+      confidence: parsed.confidence ?? "medium",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function makeFallbackReport(domain: string, depth: number, responseText: string): SubOrchestratorReport {
+  return {
+    domain,
+    depth,
+    status: "partial",
+    stages: [{
+      step: 1,
+      agent: "implementer-builder",
+      goal: "See response text",
+      status: "complete",
+      files_created: [],
+      files_modified: [],
+      duration_approx: "unknown",
+      retry_count: 0,
+    }],
+    escalations: [],
+    total_files_created: 0,
+    total_files_modified: 0,
+    confidence: "low",
+  };
+}
+
+function makeTimeoutReport(domain: string, depth: number): SubOrchestratorReport {
+  return {
+    domain,
+    depth,
+    status: "failed",
+    stages: [],
+    escalations: [{
+      step: 0,
+      reason: `Sub-orchestrator timeout (${SUB_ORCHESTRATOR_TIMEOUT}ms)`,
+      suggestion: "Check if domain is too large. Consider splitting further.",
+    }],
+    total_files_created: 0,
+    total_files_modified: 0,
+    confidence: "low",
+  };
+}
+
+async function spawnSubOrchestrator(
+  domain: string,
+  contextBrief: string,
+  subPlan: string,
+  depth: number,
+  maxDepth: number = 2,
+): Promise<SubOrchestratorReport> {
+  const c = getClient();
+  const start = Date.now();
+
+  // 1. Создаём сессию sub-orchestrator'а
+  log("INFO", `→ [sub-orch] Создание сессии для ${domain}...`);
+  const sessionRes = await c.session.create({
+    body: { title: `sub-orch: ${domain}` },
+  });
+  const sessionId = sessionRes.data?.id;
+  if (!sessionId) throw new Error(`Failed to create sub-orch session for ${domain}`);
+
+  function formatPrompt(depth: number): string {
+    return `Ты sub-orchestrator (Step Executor).
+Загрузи skill("sub-orchestrator") перед началом.
+
+## Context Brief
+### Domain
+${domain}
+
+### Depth
+depth: ${depth}
+max_depth: ${maxDepth}
+
+### User Goal
+${contextBrief}
+
+## Sub-Plan
+${subPlan}
+
+После выполнения всех шагов запиши report.json. Верни путь к нему.`;
+  }
+
+  // 2. Отправляем prompt
+  log("INFO", `→ [sub-orch] ${domain} (depth ${depth}/${maxDepth}) — отправка prompt...`);
+  await (c.session as unknown as SessionWithPrompt).promptAsync({
+    path: { id: sessionId },
+    body: {
+      agent: "sub-orchestrator",
+      parts: [{ type: "text", text: formatPrompt(depth) }],
+    },
+  });
+
+  // 3. Poll до завершения
+  let lastResponse = "";
+  while (Date.now() - start < SUB_ORCHESTRATOR_TIMEOUT) {
+    await sleep(POLL_INTERVAL_MS);
+
+    const msgRes = await c.session.messages({ path: { id: sessionId } });
+    const messages = (msgRes.data || msgRes) as Array<{
+      info: { role: string; finish?: string };
+      parts: Array<{ type: string; text?: string }>;
+    }> | undefined;
+    if (!messages?.length) continue;
+
+    // Ищем последнее assistant-сообщение с finish
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.info?.role !== "assistant") continue;
+
+      lastResponse = extractText(msg.parts ?? []);
+      if (msg.info?.finish === "stop" || msg.info?.finish === "tool-calls") {
+        // Пытаемся спарсить report.json из ответа
+        const report = tryParseReport(lastResponse, domain, depth);
+        if (report) {
+          log("INFO", `✅ [sub-orch] ${domain} — отчёт получен`);
+          await (c.session as any).delete({ path: { id: sessionId } });
+          return report;
+        }
+        // Если нет JSON-отчёта — возвращаем минимальный отчёт из последнего ответа
+        log("WARN", `[sub-orch] ${domain} — JSON не найден в ответе, fallback`);
+        await (c.session as any).delete({ path: { id: sessionId } });
+        return makeFallbackReport(domain, depth, lastResponse);
+      }
+    }
+  }
+
+  // Timeout
+  log("WARN", `[sub-orch] ${domain} — timeout ${SUB_ORCHESTRATOR_TIMEOUT}ms`);
+  await (c.session as any).abort({ path: { id: sessionId } });
+  await (c.session as any).delete({ path: { id: sessionId } });
+  return makeTimeoutReport(domain, depth);
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────

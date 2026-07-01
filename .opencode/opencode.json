@@ -69,6 +69,17 @@
     "skills-indexer": {
       "model": "opencode-go/deepseek-v4-flash",
       "thinking": { "type": "enabled", "reasoningEffort": "max" }
+    },
+    "sub-orchestrator": {
+      "model": "opencode-go/deepseek-v4-flash",
+      "prompt": ".opencode/agents/sub-orchestrator.md",
+      "description": "Step Executor. Executes pre-planned sub-plan within a bounded domain.",
+      "mode": "subagent",
+      "disable": false,
+      "tools": {
+        "task": true,
+        "skill": true
+      }
     }
   }
 }
