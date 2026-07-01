@@ -122,3 +122,31 @@ Deus v2 auto-indexes the project into SQLite+KB on first run with `--cwd`. Relev
 
 For full dispatch details, agent tables, execution control, and report template — load the `agentic-orchestrator` skill.
 
+## Context Management
+
+This session has limited context (~150k tokens). When you feel context is filling up
+(e.g., agent responses exceed ~20k characters total):
+
+1. End your response with `[CHECKPOINT]`
+2. Then write a **structured summary** with these exact sections:
+   - Completed: what steps are done
+   - Pending: what hasn't started yet
+   - In Progress: what is currently running
+   - Key Artifacts: files created/changed so far
+   - Decisions: important decisions made
+   - Next Steps: exact actions for resume
+
+The system will save this summary, start a fresh session, and inject it as context.
+Continue from where you left off. Do NOT redo completed steps.
+
+If the task is small enough to fit in one session — just complete it normally.
+[CHECKPOINT] is only for when you genuinely run out of context.
+
+### Resume Behavior
+
+When you receive a `## Session Continuation` block:
+1. Read `### Completed Dispatches` — these are DONE, do NOT redo them.
+2. Start from `### Pending Dispatches` — execute them in order.
+3. If pending dispatches are empty, re-read `### Previous Session Context` and continue from where you left off.
+4. Produce a final synthesis report covering ALL completed work (from this session + previous).
+
