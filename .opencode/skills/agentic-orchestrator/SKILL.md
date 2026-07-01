@@ -114,6 +114,17 @@ Deus v2 integrates a KB (SQLite + FTS5 + embeddings). Auto-indexes project on fi
 |-------|-------|
 | `architecture-update` | Обновить knowledge/architecture.md |
 
+## Multi-Pass Validation
+
+For complex or high-risk plans, use `references/dispatch-iterative-plan.md`:
+architect-planner → parallel review (reviewer + security + code-reviewer) → architect-planner (refine) → reviewer-critic (final sign-off)
+
+Max 2 iterations. If unresolved on 2nd pass, escalate to user.
+
+## Skills Discovery
+
+See `references/agents.md` for the agent roster. Run `skills-indexer` to regenerate `.orchestrator/skills-index.md`. When a skill matches the task domain, include "Follow skill: X" in the sub-agent's prompt.
+
 ## Artifacts
 
 Results saved to `.deus/runs/run-{timestamp}/`. Final report template in `references/synthesis-template.md`.

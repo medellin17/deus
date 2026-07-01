@@ -621,8 +621,18 @@ async function runSession(
     const allMessages = (msgRes.data || msgRes) as Array<any>;
     let totalTokens = 0;
     for (const msg of allMessages) {
-      if (msg.info?.role === "assistant" && msg.info?.tokens) {
-        totalTokens = msg.info.tokens.input + msg.info.tokens.output;
+      if (msg.info?.role !== "assistant") continue;
+
+      // Пытаемся получить реальное число токенов от API
+      const actualTokens = msg.info?.tokens;
+      if (actualTokens !== undefined && actualTokens !== null) {
+        totalTokens += (actualTokens.input ?? 0) + (actualTokens.output ?? 0);
+      } else {
+        // Fallback: оценка по длине текста (~1 токен на 2-4 символа для английского/русского)
+        // Используем консервативную оценку: 1 токен ≈ 2.5 символа
+        const textLen = msg.text?.length ?? 0;
+        const estimatedTokens = Math.ceil(textLen / 2.5);
+        totalTokens += estimatedTokens;
       }
     }
     // Порог: 130k-150k (берём 140k как середину)

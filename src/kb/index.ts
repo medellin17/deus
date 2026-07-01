@@ -6,6 +6,9 @@ import { RagKbProvider } from "./rag-provider.js";
 import { NoopKbProvider } from "./noop-provider.js";
 import type { KbProvider } from "./provider.js";
 
+export { CheckpointManager } from "./checkpoint.js";
+export type { CheckpointState, CompletedDispatch, PendingDispatch } from "./checkpoint.js";
+
 /** @deprecated Use KbProvider type instead */
 export type KnowledgeBase = KbProvider;
 

@@ -1,5 +1,7 @@
 # План масштабирования оркестратора
 
+> **Связанные планы:** [CONTEXT-OVERFLOW-PLAN.md](./CONTEXT-OVERFLOW-PLAN.md) — Phase 1 (Checkpoints) + Phase 2 (Sub-orchestrators)
+
 Статус: **утверждено пользователем** (28.06.2026)
 
 Цель: перейти от простых пайплайнов (3-5 агентов) к сложным задачам на десятки агентов
@@ -339,6 +341,18 @@ const summary = await runWorker({
 });
 ```
 
+### Sub-Orchestrators (Phase 2 контекст-оверфлоу)
+
+> **Детальная спецификация:** [CONTEXT-OVERFLOW-PLAN.md](./CONTEXT-OVERFLOW-PLAN.md) — Phase 2
+
+Sub-orchestrator'ы решают две проблемы:
+1. **Контекстный бюджет** — каждая подзадача в своей сессии, контекст не смешивается
+2. **Параллелизм** — независимые домены выполняются одновременно
+
+Зависимость: Phase 1 (Checkpoints) → Phase 2 → DAG Engine.
+
+Sub-Orchestrator при переполнении контекста использует Phase 1 (чекпоинты) внутри своей сессии.
+
 ### Иерархические подоркестраторы (для 50+ агентов)
 
 ```
@@ -460,17 +474,18 @@ interface ProgressUpdate {
 
 ```
 orchestrator-cli
-├── SQLite State        # чекпоинты, resume, аналитика
+├── SQLite State        # задачи, ноды, аналитика
 ├── Knowledge Base      # FTS5 + RAG + Memory Tree
 │   ├── FTS5 Index      # keyword search (BM25)
 │   ├── Embeddings      # Gemini (3072 dim)
 │   └── Memory Tree     # hierarchical summaries
+├── Checkpoint Manager  # COF Phase 1: чекпоинты + resume
 ├── DAG Engine          # топологическая сортировка, выполнение
 ├── Worker Pool         # пул параллельных сессий
 ├── Retry Engine        # повторы, fallback
 ├── Budget Controller   # контроль стоимости
 ├── Monitor             # Telegram + Web (потом)
-└── Sub-Orchestrators   # иерархия для 50+ агентов
+└── Sub-Orchestrators   # COF Phase 2: иерархия для 50+ агентов
 ```
 
 ### Порядок реализации
@@ -482,12 +497,13 @@ orchestrator-cli
 | 1c | Knowledge Base (RAG + Gemini) | средняя | высокий | SQLite |
 | 1d | Knowledge Base (Memory Tree) | средняя | высокий | SQLite, LLM |
 | 1e | SuperContext Pipeline | средняя | высокий | FTS5 + RAG |
-| 2 | DAG Engine | высокая | высокий | SQLite |
+| 1f | Checkpoints (COF Phase 1) | средняя | высокий | SQLite |
+| 2 | DAG Engine | высокая | высокий | SQLite, Checkpoints |
 | 3 | Retry + fallback | средняя | высокий | SQLite |
 | 4 | Agent-as-Worker | средняя | высокий | DAG |
 | 5 | Budget controller | низкая | записать | SQLite |
 | 6 | Telegram monitor | средняя | средний | — |
-| 7 | Sub-orchestrators | высокая | высокий | DAG, SQLite, KB |
+| 7 | Sub-orchestrators (COF Phase 2) | высокая | высокий | DAG, SQLite, KB, Checkpoints |
 | 8 | Web-панель | высокая | низкий | — |
 
 ---
