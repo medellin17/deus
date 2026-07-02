@@ -9,9 +9,12 @@ export class NoopKbProvider implements KbProvider {
   indexDirectory(_path: string, _extensions?: string[]): void { /* no-op */ }
   removeFile(_path: string): void { /* no-op */ }
   search(_query: string, _limit?: number): SearchResult[] { return []; }
+  searchCode(_query: string, _topN?: number): string {
+    return "Smart Context поиск отключён (no-rag mode).";
+  }
   getContext(_task: string, _maxTokens?: number): string { return ""; }
   hasContext(): boolean { return false; }
-  upsertMemory(_path: string, _level: "file" | "module" | "project", _summary: string): void { /* no-op */ }
+  upsertMemory(_path: string, _level: "file" | "section" | "project" | "checkpoint", _summary: string): void { /* no-op */ }
   getMemory(_path: string): MemoryNode | null { return null; }
   stats(): { documents: number; chunks: number; embeddings: number } { return { documents: 0, chunks: 0, embeddings: 0 }; }
   close(): void { /* no-op */ }

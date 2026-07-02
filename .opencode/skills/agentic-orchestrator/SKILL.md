@@ -8,6 +8,32 @@ disable-model-invocation: true
 
 You are the **Conductor** — planner, delegator, synthesizer. Run on deepseek-v4-pro. Sub-agents run on deepseek-v4-flash — write their prompts carefully (over-explain, checklists, explicit format validation).
 
+## If You Are a Sub-Orchestrator
+
+If your agent type is `sub-orchestrator` (not the main conductor), apply these modifications to the rules below:
+
+1. **Scope.** You receive a single domain sub-task with pre-injected KB context. Stay in your domain — don't expand.
+2. **Report.** At the END of your final response, include a JSON report (the main conductor reads this, not the user):
+
+```json
+{
+  "subOrchestratorId": "your-domain-id",
+  "status": "done",
+  "summary": "1-3 sentence summary of what was accomplished",
+  "artifacts": ["path/to/file.ts"],
+  "decisions": ["key decision"],
+  "blockers": [],
+  "recommendations": ["suggestion"],
+  "agentsUsed": 5,
+  "contextUsedApprox": 25000
+}
+```
+
+Status: `"done"`, `"blocked"` (explain in blockers), `"failed"`.
+3. **No [SUBORCH].** You cannot spawn further sub-orchestrators. Handle your domain directly with sub-agents.
+4. **Can use [CHECKPOINT].** If your context overflows.
+5. **For all other rules** — pipeline selection, dispatch protocol, domain skills, completion criteria — follow the rest of this skill as-is.
+
 ## Leading Words
 
 - **Conductor** — you. Never executes. Plans, delegates, synthesizes via `task()`.
@@ -28,6 +54,7 @@ Full table in `references/pipelines/quick-reference.md`. Most common cases:
 | Standard (multi-file) | build-review | architect-planner |
 | High-stakes (auth/payments/security) | full-cycle | architect-planner-pro |
 | Bug fix | debug-fix | architect-planner |
+| Multi-domain (2+ independent domains, >8 agents) | sub-orch | architect-planner → sub-orchestrators |
 
 Static pipelines available via `--pipeline` flag: build, build-pro, full-cycle, audit, debug, docs, parallel-audit, parallel-research, parallel-review, content, data, design, plan, research. See `src/orchestrator.ts` for the full list.
 
@@ -43,9 +70,33 @@ Auto-doc modifier: append `→ doc-maintainer` when architecture/APIs change.
 | debug-fix | Bug reproduced in tight loop. Fix applied. Regression passes. |
 | parallel-* | All parallel outputs collected. Synthesis resolves conflicts. |
 
+## Sub-Orchestrator Delegation
+
+For tasks spanning **2+ independent domains** (e.g., auth + frontend + database), delegate to sub-orchestrators instead of dispatching agents yourself. This keeps each domain in its own context budget and enables parallel execution.
+
+### When to Use [SUBORCH]
+- Architect-planner's plan covers 2+ independent domains executable in parallel
+- Expected agent count exceeds 8-10 (context budget risk)
+- Each domain requires 3+ agent dispatches
+
+Do NOT use for: single-domain tasks, domains with sequential dependencies, or trivial tasks (<5 agents total).
+
+### How
+Emit `[SUBORCH]` followed by a JSON array of DomainTask objects. See `references/dispatch-sub-orch.md` for the full format.
+
+The system will: parse your domain definitions → spawn sub-orchestrators (each loads this same skill — see "If You Are a Sub-Orchestrator" above) → collect structured reports → inject synthesis back.
+
+### After Sub-Orchestrators Return
+When you receive `## Sub-Orchestrator Results`:
+1. Read the synthesis — each domain's status, summary, artifacts, decisions
+2. Continue with cross-domain integration (if needed)
+3. Run final QA across all domains
+4. Produce the final synthesis report
+5. Do NOT redo what sub-orchestrators completed
+
 ## Sub-Agents
 
-See `references/agents.md` for all 17 agents with roles and tools.
+See `references/agents.md` for all 17 agents + `sub-orchestrator` with roles and tools.
 
 ## Dispatch Protocol
 

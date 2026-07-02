@@ -31,6 +31,7 @@ On first run, Deus automatically:
 | `--parallel "task1" "task2"` | Parallel execution |
 | `--index /path/to/project` | Manual KB indexing |
 | `--kb-stats` | Knowledge Base statistics |
+| `--metrics` | Show orchestrator-monitor plugin metrics |
 
 ## Architecture
 
@@ -56,15 +57,6 @@ Knowledge Base (SQLite + FTS5)
     └── Memory across sessions
 ```
 
-## Models
-
-| Agent | Model | Thinking |
-|-------|-------|----------|
-| orchestrator-conductor | `deepseek-v4-pro` | `max` |
-| architect-planner-pro | `deepseek-v4-pro` | `max` |
-| reviewer-critic-pro | `deepseek-v4-pro` | `max` |
-| All others | `deepseek-v4-flash` | `max` |
-
 ## Project Structure
 
 Each run creates a timestamped folder in the target project:
@@ -84,51 +76,10 @@ Each run creates a timestamped folder in the target project:
 
 ## Knowledge Base
 
-- **FTS5** — keyword search (BM25, zero dependencies)
-- **Memory Tree** — hierarchical summaries (file/module/project)
-- **SuperContext** — auto-context generation for tasks
-- **Per-project** — each project has its own DB (`.deus/kb/orchestrator.db`)
+Встроенная Knowledge Base на SQLite + FTS5 с гибридным поиском (BM25 + Memory Tree + опциональные эмбеддинги Gemini).
+Индексация проекта происходит автоматически при первом запуске. Контекст инжектится перед планированием.
 
-## Smart Context Integration
-
-Deus includes a custom tool for [Smart Context Retrieving](https://github.com/medellin17/smart-context-retrieving) — smart code search using BM25 + Symbol Graph + Graph Walk.
-
-### Setup
-
-```bash
-# Install Smart Context in your project
-cd /your/project
-npm install smart-context-retrieving
-
-# Index your project
-npx code-assistant index .
-```
-
-### Usage
-
-Agents automatically use `search_code` tool before reading or editing code:
-
-```
-search_code(query="user authentication", project="/path/to/project")
-```
-
-### What it does
-
-- **BM25** — keyword search with synonyms
-- **Symbol Graph** — parses functions/classes/types and their calls
-- **Graph Walk** — 1-2 hops along call graph
-- **Category Weights** — different ranking for bugfix/feature/refactor
-- **Skeletonization** — compresses large files to structure + relevant chunks
-
-### Tables
-
-| Table | Purpose |
-|-------|---------|
-| `kb_documents` | Indexed files |
-| `kb_chunks` | Semantic chunks |
-| `kb_chunks_fts` | FTS5 index |
-| `kb_embeddings` | Vector embeddings |
-| `kb_memory_tree` | Hierarchical summaries |
+Подробнее об агентах, пайплайнах и KB: [AGENTS.md](./AGENTS.md).
 
 ## Environment
 
@@ -152,7 +103,7 @@ search_code(query="user authentication", project="/path/to/project")
 ## Related Projects
 
 - [opencode-orchestrator](https://github.com/medellin17/opencode-orchestrator) — v1, original orchestrator that inspired Deus
-- [smart-context-retrieving](https://github.com/medellin17/smart-context-retrieving) — smart code search (BM25 + Symbol Graph + Graph Walk), integrated as custom tool
+- [AGENTS.md](./AGENTS.md) — полное описание агентов, пайплайнов и KB
 
 ## License
 

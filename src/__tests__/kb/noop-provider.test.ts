@@ -40,7 +40,7 @@ void describe("NoopKbProvider", () => {
   void it("upsertMemory does nothing", () => {
     const p = new NoopKbProvider();
     assert.doesNotThrow(() => p.upsertMemory("/path", "file", "summary"));
-    assert.doesNotThrow(() => p.upsertMemory("/path", "module", "summary"));
+    assert.doesNotThrow(() => p.upsertMemory("/path", "section", "summary"));
     assert.doesNotThrow(() => p.upsertMemory("/path", "project", "summary"));
   });
 

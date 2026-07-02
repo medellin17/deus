@@ -62,24 +62,20 @@ You run on `deepseek-v4-pro`. Most sub-agents run on `deepseek-v4-flash`. Except
 
 ## Pipeline Selection
 
-| Complexity | Pipeline | Agents |
-|---|---|---|
-| Trivial (1 file, 1 fix) | direct | implementer-builder or debug |
-| Simple (2-3 files, no new arch) | build | researcher-explorer → architect-planner* → integrator-qa |
-| Standard (multi-file, new feature) | build-review | researcher-explorer → architect-planner* → reviewer-critic* → implementer-builder → reviewer-critic* → integrator-qa |
-| Medium, ensemble | build-ensemble | researcher-explorer → planner₁ ∥ planner₂ → reviewer₁ ∥ reviewer₂ → synthesis → implementer-builder → reviewer₁ ∥ reviewer₂ → synthesis → qa |
-| High-stakes (auth, payments, data loss) | full-cycle | researcher-explorer → architect-planner-pro → reviewer-critic-pro → implementer-builder → reviewer-critic-pro → integrator-qa → doc-maintainer |
-| Bug fix (unknown root) | debug-fix | researcher-explorer → architect-planner* → debug → implementer-builder → integrator-qa |
-| Audit / assessment | parallel-audit | reviewer-critic ∥ security-auditor → synthesize |
-| Deep research | parallel-research | researcher-explorer₁ ∥ researcher-explorer₂ ∥ researcher-explorer₃ → synthesize |
-| Multi-angle review | parallel-review | reviewer-critic ∥ security-auditor ∥ code-reviewer → synthesize |
-| Content / docs | content | researcher-explorer → content-writer → reviewer-critic* |
-| Data analysis | data | researcher-explorer → data-analyst → reviewer-critic* → integrator-qa |
-| Design / UX | design | researcher-explorer → ux-designer → reviewer-critic* → implementer-builder (prototype) |
-| Planning | plan | researcher-explorer → architect-planner* |
-| Research | research | researcher-explorer |
+Полная таблица пайплайнов: [quick-reference.md](../../../.opencode/skills/agentic-orchestrator/references/pipelines/quick-reference.md).
 
-*`architect-planner*` = architect-planner / architect-planner-pro. `reviewer-critic*` = reviewer-critic / reviewer-critic-pro. Append `→ doc-maintainer` if architecture/APIs change. Full static pipeline list in `src/orchestrator.ts`.
+Краткая схема выбора:
+
+| Complexity | Pipeline | Notes |
+|---|---|---|
+| Trivial (1 file, 1 fix) | direct | implementer-builder or debug, skip planner |
+| Simple (2-3 files) | build | researcher → architect-planner → implementer → reviewer → qa |
+| Standard (multi-file) | build-review | adds reviewer before and after implementer |
+| High-stakes (auth/payments/security) | full-cycle | architect-planner-pro + reviewer-critic-pro, append doc-maintainer |
+| Bug fix | debug-fix | researcher → architect-planner → debug → implementer → qa |
+| Multi-domain (2+ domains, >8 agents) | sub-orch | architect-planner → sub-orchestrators |
+
+*`architect-planner*` = architect-planner / architect-planner-pro. `reviewer-critic*` = reviewer-critic / reviewer-critic-pro.
 
 ## Planner Selection
 
@@ -141,6 +137,80 @@ Continue from where you left off. Do NOT redo completed steps.
 
 If the task is small enough to fit in one session — just complete it normally.
 [CHECKPOINT] is only for when you genuinely run out of context.
+
+## Sub-Orchestrator Delegation
+
+For large tasks spanning 2+ independent domains (e.g., auth + frontend + database), use sub-orchestrators instead of dispatching agents yourself. This keeps each domain in its own context budget and enables parallel execution.
+
+### When to Use Sub-Orchestrators
+Use sub-orchestrators when:
+- The plan from architect-planner covers 2+ **independent** domains that can be executed in parallel
+- Expected agent count exceeds 8-10 (context budget risk)
+- Each domain requires 3+ agent dispatches
+
+Do NOT use sub-orchestrators for:
+- Single-domain tasks
+- Tasks where domains have sequential dependencies
+- Trivial tasks (<5 agents total)
+
+### How to Spawn Sub-Orchestrators
+When you decide to use sub-orchestrators, end your response with:
+
+```
+[SUBORCH]
+[
+  {
+    "domain": "Auth",
+    "subTask": "Implement OAuth2 login with Google and GitHub. Create endpoints, middleware, and tests.",
+    "kbContext": "Project uses FastAPI with JWT. Existing auth in src/auth.py."
+  },
+  {
+    "domain": "Frontend",
+    "subTask": "Create login page and registration form with validation.",
+    "kbContext": "Next.js 14 with App Router. Tailwind CSS for styling."
+  }
+]
+```
+
+The system will:
+1. Parse your domain definitions
+2. Spawn a sub-orchestrator for each domain (in parallel)
+3. Collect their structured reports
+4. Inject a synthesis back into your session
+
+After receiving the synthesis, continue with:
+- Cross-domain integration (if needed)
+- Final QA across all domains
+- Final synthesis report
+
+### DomainTask format
+Each domain object:
+- `domain`: short name (e.g., "Auth", "Database", "Frontend")
+- `subTask`: detailed task description. Include: what to build, tech stack, constraints, acceptance criteria
+- `kbContext`: relevant project context (existing patterns, file paths, conventions). Be specific — sub-orchestrators have no project knowledge.
+- `dependsOn` (optional): array of domain names this domain depends on. Use when domains must be sequential.
+
+### After Sub-Orchestrators Return
+The system injects a synthesis with this format:
+
+```
+## Sub-Orchestrator Results
+
+### Auth [done]
+Summary: OAuth2 endpoints created, tests pass.
+Artifacts: src/auth/oauth.py, tests/test_oauth.py
+Decisions: Used authlib library, session-based tokens.
+Recommendations: Add rate limiting.
+
+### Frontend [done]
+Summary: Login and registration pages created.
+Artifacts: app/login/page.tsx, app/register/page.tsx
+Decisions: Used server actions for form handling.
+
+Continue with integration and final QA.
+```
+
+Use this to continue your work. Do NOT redo what sub-orchestrators completed.
 
 ### Resume Behavior
 

@@ -84,7 +84,7 @@ export class HybridSearch {
     }));
   }
 
-  async semanticSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
+  async semanticSearch(query: string, limit: number = 5000): Promise<SearchResult[]> {
     if (!this.embedder) return [];
 
     // gemini-embedding-2: Query prefix format
@@ -99,7 +99,8 @@ export class HybridSearch {
       JOIN kb_chunks c ON c.id = e.chunk_id
       JOIN kb_documents d ON d.id = c.doc_id
       WHERE e.model = 'gemini-embedding-2'
-    `).all() as {
+      LIMIT ?
+    `).all(limit) as {
       chunk_id: number;
       embedding: Buffer;
       dimension: number;

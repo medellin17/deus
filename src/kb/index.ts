@@ -7,7 +7,6 @@ import { NoopKbProvider } from "./noop-provider.js";
 import type { KbProvider } from "./provider.js";
 
 export { CheckpointManager } from "./checkpoint.js";
-export type { CheckpointState, CompletedDispatch, PendingDispatch } from "./checkpoint.js";
 
 /** @deprecated Use KbProvider type instead */
 export type KnowledgeBase = KbProvider;
@@ -20,6 +19,6 @@ export function createKB(dbPath?: string, useRag?: boolean): KbProvider {
 // Preserve all existing re-exports:
 export type { FTS5Result } from "./fts5.js";
 export type { SearchResult } from "./search.js";
-export type { MemoryNode } from "./memory-tree.js";
+export type { MemoryNode } from "./schema.js";
 export type { Chunk, Document, Embedding, KBDatabase } from "./schema.js";
 export { cosineSimilarity } from "./embeddings.js";

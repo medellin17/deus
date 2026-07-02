@@ -7,6 +7,7 @@ import { KBIndexer } from "./indexer.js";
 import { getEmbeddings } from "./embeddings.js";
 import type { Embedder } from "./embeddings.js";
 import type { KbProvider } from "./provider.js";
+import { SmartContextEngine } from "./smart-context/index.js";
 
 export class RagKbProvider implements KbProvider {
   private fts5: FTS5Index;
@@ -15,11 +16,14 @@ export class RagKbProvider implements KbProvider {
   private superContext: SuperContext;
   private indexer: KBIndexer;
   private embedder?: Embedder;
+  private smartContext: SmartContextEngine;
+  private projectRoot: string = "";
   public db: KBDatabase;
 
   constructor(dbPath?: string) {
     this.db = openKB(dbPath);
     const raw = this.db.raw;
+    this.smartContext = new SmartContextEngine(raw);
 
     if (process.env.GEMINI_API_KEY) {
       try {
@@ -41,7 +45,11 @@ export class RagKbProvider implements KbProvider {
   }
 
   indexDirectory(path: string, extensions?: string[]): void {
+    this.projectRoot = path;
     this.indexer.indexDirectory(path, extensions);
+    this.smartContext.indexDirectory(path).catch((err: Error) => {
+      console.error(`[KB] Smart context indexing error: ${err.message}`);
+    });
   }
 
   removeFile(path: string): void {
@@ -52,6 +60,13 @@ export class RagKbProvider implements KbProvider {
     return this.hybridSearch.search(query, limit);
   }
 
+  searchCode(query: string, topN: number = 10): string {
+    if (!this.projectRoot) {
+      return "Проект не проиндексирован. Вызовите indexDirectory() сначала.";
+    }
+    return this.smartContext.search(query, this.projectRoot, topN);
+  }
+
   getContext(task: string, maxTokens?: number): string {
     return this.superContext.getContext(task, maxTokens);
   }
@@ -60,7 +75,7 @@ export class RagKbProvider implements KbProvider {
     return this.superContext.hasContext();
   }
 
-  upsertMemory(path: string, level: "file" | "module" | "project", summary: string): void {
+  upsertMemory(path: string, level: "file" | "section" | "project" | "checkpoint", summary: string): void {
     this.memoryTree.upsert(path, level, summary);
   }
 

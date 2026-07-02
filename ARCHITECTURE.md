@@ -19,7 +19,7 @@
 
 ### Что добавляет v2
 
-Версия v2 строится на **Node.js SDK** (`@opencode-ai/sdk`) и добавляет три ключевых слоя:
+Версия v2 строится на **Node.js SDK** (`@opencode-ai/sdk`) и добавляет ключевые слои:
 
 **1. Программная оркестрация** — скрипт `orchestrator.ts` управляет сессиями через API:
 - Создание/форк сессий
@@ -27,15 +27,16 @@
 - Мониторинг статуса через polling
 - Сбор и агрегация результатов
 
-**2. Плагин мониторинга** — `orchestrator-monitor.ts` отслеживает lifecycle сессий:
+**2. Knowledge Base** — SQLite + FTS5 + Memory Tree + Smart Context для контекста между сессиями, авто-индексация, чекпоинты.
+**3. Плагин мониторинга** — `orchestrator-monitor.ts` отслеживает lifecycle сессий:
 - Хуки: `session.created`, `session.idle`, `session.error`
 - Метрики: количество созданных/завершённых/упавших сессий
 - Средняя длительность выполнения
 
-**3. Три режима взаимодействия:**
+**4. Три режима взаимодействия:**
 - CLI скрипт (основной режим)
-- Web-панель (опционально, через `opencode web`)
-- Telegram-бот (опционально, через grammY/telegraf)
+- Web-панель (в планах, через `opencode web`)
+- Telegram-бот (в планах, через grammY/telegraf)
 
 ### Что остаётся без изменений
 
@@ -50,28 +51,36 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Пользователь                                                │
-│  ┌──────┐  ┌──────────┐  ┌─────────────┐                    │
-│  │ CLI  │  │ Web Panel│  │ Telegram Bot│                    │
-│  └──┬───┘  └────┬─────┘  └──────┬──────┘                    │
-│     └───────────┼───────────────┘                            │
-│                 ▼                                             │
-│  ┌──────────────────────────────────┐                        │
-│  │  orchestrator.ts (Node.js SDK)  │                        │
-│  │  • runPipeline()                │                        │
-│  │  • runParallel()                │                        │
-│  │  • runSequential()              │                        │
-│  │  • runDirect()                  │                        │
-│  └──────────────┬───────────────────┘                        │
+│  ┌──────┐  ┌──────────────┐  ┌───────────────┐               │
+│  │ CLI  │  │ Web Panel    │  │ Telegram Bot  │               │
+│  │      │  │ (future)     │  │ (future)      │               │
+│  └──┬───┘  └──────┬───────┘  └───────┬───────┘               │
+│     └─────────────┼──────────────────┘                        │
+│                   ▼                                           │
+│  ┌──────────────────────────────────────┐                    │
+│  │  orchestrator.ts (Node.js SDK)      │                    │
+│  │  • runPipeline() / runParallel()    │                    │
+│  │  • runSequential() / runDirect()    │                    │
+│  │  • --resume / --checkpoint          │                    │
+│  └──────────────┬───────────────────────┘                    │
 │                 │ HTTP (localhost:4096)                       │
-│  ┌──────────────▼───────────────────┐                        │
-│  │  opencode serve                  │                        │
-│  │  ┌─────────────────────────────┐ │                        │
-│  │  │ 16 агентов (из v1)         │ │                        │
-│  │  │ 23 skills (из v1)          │ │                        │
-│  │  │ Plugin: orchestrator-      │ │                        │
-│  │  │   monitor                  │ │                        │
-│  │  └─────────────────────────────┘ │                        │
-│  └──────────────────────────────────┘                        │
+│  ┌──────────────▼───────────────────────┐                    │
+│  │  opencode serve                      │                    │
+│  │  ┌─────────────────────────────────┐ │                    │
+│  │  │ 17 агентов + sub-orchestrator  │ │                    │
+│  │  │ 23 skills                       │ │                    │
+│  │  │ Plugin: orchestrator-monitor    │ │                    │
+│  │  └─────────────────────────────────┘ │                    │
+│  └──────────────┬───────────────────────┘                    │
+│                 ▼                                             │
+│  ┌──────────────────────────────────────┐                    │
+│  │  Knowledge Base (SQLite + FTS5)     │                    │
+│  │  • BM25 search (keyword)            │                    │
+│  │  • Memory Tree (summaries)          │                    │
+│  │  • Smart Context (symbol/import)    │                    │
+│  │  • Checkpoints (state + summary)    │                    │
+│  │  • Sub-orchestrator reports         │                    │
+│  └──────────────────────────────────────┘                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,7 +108,7 @@ orchestrator.ts ──HTTP──▶ opencode serve ──▶ Агент (сес�
 | `orchestrator.ts` | Скрипт | Оркестратор пайплайнов, управление сессиями |
 | `orchestrator-monitor.ts` | Плагин | Мониторинг lifecycle сессий, сбор метрик |
 | `opencode.json` | Конфиг | Модели и thinking для каждого агента |
-| `agents/*.md` | Промпты | Определения 16 агентов |
+| `agents/*.md` | Промпты | Определения 17 агентов + sub-orchestrator |
 | `skills/*/SKILL.md` | Промпты | Определения 23 skill'ов |
 
 ---
@@ -110,17 +119,18 @@ orchestrator.ts ──HTTP──▶ opencode serve ──▶ Агент (сес�
 
 | Агент | Модель | thinking |
 |---|---|---|
-| `orchestrator-conductor` | `opencode-go/mimo-v2.5-pro` | `reasoningEffort: high` |
-| `architect-planner-pro` | `opencode-go/mimo-v2.5-pro` | `reasoningEffort: high` |
-| Остальные 14 агентов | `opencode-go/mimo-v2.5` | (default) |
+| `orchestrator-conductor` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
+| `architect-planner-pro` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
+| `reviewer-critic-pro` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
+| Остальные 15 агентов | `opencode-go/deepseek-v4-flash` | `reasoningEffort: max` |
 
 ### Почему два класса моделей
 
-**Pro-модель** (`mimo-v2.5-pro`) используется для агентов, принимающих стратегические решения:
+**Pro-модель** (`opencode-go/deepseek-v4-pro`) используется для агентов, принимающих стратегические решения:
 - `orchestrator-conductor` — декомпозирует задачи, выбирает пайплайны, проверяет результаты
 - `architect-planner-pro` — проектирует архитектуру для сложных/критичных задач
 
-**Базовая модель** (`mimo-v2.5`) используется для агентов, выполняющих конкретную работу:
+**Базовая модель** (`opencode-go/deepseek-v4-flash`) используется для агентов, выполняющих конкретную работу:
 - `implementer-builder` — пишет код
 - `reviewer-critic` — ревьюит код
 - `researcher-explorer` — исследует кодовую базу
@@ -186,7 +196,9 @@ $ npx tsx src/orchestrator.ts "Добавить OAuth2 в проект"
 ✅ Готово. Отчёт: data/tasks/oauth2/result.md
 ```
 
-### 4.2. Web Panel (опционально)
+### 4.2. Web Panel (не реализовано)
+
+> **Статус:** запланировано на будущее. В текущей версии Web Panel не реализована.
 
 OpenCode предоставляет встроенный веб-интерфейс:
 
@@ -231,7 +243,9 @@ app.get('/metrics', async (req, res) => {
 });
 ```
 
-### 4.3. Telegram Bot (опционально)
+### 4.3. Telegram Bot (не реализовано)
+
+> **Статус:** запланировано на будущее. В текущей версии Telegram Bot не реализован.
 
 Telegram-бот работает как тонкая обёртка над скриптом оркестратора:
 
@@ -358,7 +372,7 @@ async function runWithRetry(fn: () => Promise<SessionResult>, retries = 2) {
 
 ## 6. Plugin: orchestrator-monitor.ts
 
-Плагин мониторинга отслеживает lifecycle сессий и собирает метрики.
+Плагин мониторинга отслеживает lifecycle сессий и собирает метрики. Расположен в `.opencode/plugins/orchestrator-monitor.ts`.
 
 ### Lifecycle hooks
 
@@ -439,6 +453,7 @@ v2 **полностью обратно совместим** с v1:
 - Все skill'ы доступны
 - Конфигурация моделей сохранена
 - Новые компоненты — дополнение, а не замена
+- Добавлен суб-оркестратор для декомпозиции больших задач
 
 ---
 
@@ -448,13 +463,14 @@ v2 **полностью обратно совместим** с v1:
 agentic-orchestrator-v2/
 ├── .opencode/
 │   ├── opencode.json              # Конфигурация моделей и thinking
-│   ├── agents/                    # Промпты агентов (из v1)
+│   ├── agents/                    # Промпты 18 агентов (17 + sub-orchestrator)
 │   │   ├── orchestrator-conductor.md
 │   │   ├── researcher-explorer.md
 │   │   ├── architect-planner.md
 │   │   ├── architect-planner-pro.md
 │   │   ├── implementer-builder.md
 │   │   ├── reviewer-critic.md
+│   │   ├── reviewer-critic-pro.md
 │   │   ├── integrator-qa.md
 │   │   ├── debug.md
 │   │   ├── doc-maintainer.md
@@ -464,42 +480,40 @@ agentic-orchestrator-v2/
 │   │   ├── code-reviewer.md
 │   │   ├── test-engineer.md
 │   │   ├── security-auditor.md
-│   │   └── skills-indexer.md
-│   └── skills/                    # Skill'ы (из v1)
+│   │   ├── skills-indexer.md
+│   │   └── sub-orchestrator.md
+│   ├── tools/
+│   │   └── search-code.ts         # Smart Context tool (built-in)
+│   ├── plugins/
+│   │   └── orchestrator-monitor.ts# Плагин мониторинга
+│   └── skills/                    # Skill'ы
 │       ├── agentic-orchestrator/
-│       ├── architecture-security-reviewer/
-│       ├── architecture-update/
 │       ├── code-verifier/
-│       ├── commit-reviewer/
-│       ├── deep-auditor/
-│       ├── doc-audit/
-│       ├── doc-pruner/
-│       ├── doc-scaffold/
-│       ├── doc-transfer/
-│       ├── doc-update/
-│       ├── multi-agent-scanner/
-│       ├── peer-reviewer/
-│       ├── plan-creator/
-│       ├── plan-intent-validator/
-│       ├── plan-refiner/
-│       ├── plan-reviewer/
-│       ├── project-code-auditor/
-│       ├── security-prompt-crafter/
-│       ├── skill-creator/
-│       ├── skills-indexer/
-│       ├── white-box-review-runner/
-│       └── ...
-├── agents/                        # Агенты (исходники, из v1)
-├── skills/                        # Skill'ы (исходники, из v1)
+│       ├── ...                    # 32 skill'а
+│       └── white-box-review-runner/
 ├── src/
-│   └── orchestrator.ts            # Оркестратор (НОВОЕ)
-├── plugins/
-│   └── orchestrator-monitor.ts    # Плагин мониторинга (НОВОЕ)
+│   ├── orchestrator.ts            # Оркестратор (CLI + SDK)
+│   ├── types.ts                   # Типы SubOrchestratorReport и др.
+│   ├── metrics.ts                 # Метрики из плагина мониторинга
+│   ├── opencode-client.ts         # Адаптер над @opencode-ai/sdk
+│   └── kb/                        # Knowledge Base (SQLite + FTS5)
+│       ├── schema.ts              # SQLite схема
+│       ├── chunker.ts             # Семантический чанкинг
+│       ├── fts5.ts                # BM25 поиск
+│       ├── embeddings.ts          # Gemini эмбеддинги
+│       ├── memory-tree.ts         # Иерархические саммари
+│       ├── search.ts              # Гибридный поиск
+│       ├── super-context.ts       # Авто-инжект контекста
+│       ├── indexer.ts             # Индексация файлов
+│       ├── checkpoint.ts          # CheckpointManager
+│       ├── index.ts               # Public API
+│       └── smart-context/         # SmartContextEngine (built-in)
 ├── data/
 │   └── tasks/                     # Результаты задач
-├── package.json                   # Зависимости (НОВОЕ)
-├── ARCHITECTURE.md                # Этот документ
-└── README.md
+├── package.json                   # Зависимости
+├── AGENTS.md                      # Single source of truth по агентам
+├── README.md
+└── ARCHITECTURE.md                # Этот документ
 ```
 
 ---
@@ -515,9 +529,9 @@ agentic-orchestrator-v2/
 | **Параллелизм** | Нет | `runParallel()` | Неизвестно |
 | **Мониторинг** | Нет | Плагин + метрики | Встроенный |
 | **Повторяемость** | Низкая | Высокая | Средняя |
-| **Режимы работы** | OpenCode UI | CLI + Web + Telegram | Web UI |
+| **Режимы работы** | OpenCode UI | CLI (Web/TG — future) | Web UI |
 | **Модели** | 2 класса (pro/base) | 2 класса (pro/base) | Зависит от конфига |
-| **Агенты** | 16 | 16 | Зависит от конфига |
+| **Агенты** | 16 | 18 (17 + sub-orchestrator) | Зависит от конфига |
 | **Skill'ы** | 23 | 23 | Нет аналога |
 
 ### Преимущества v2 перед v1
@@ -525,7 +539,7 @@ agentic-orchestrator-v2/
 - **Программный контроль** — управление сессиями через API, а не промпты
 - **Параллельные пайплайны** — возможность запускать нескольких агентов одновременно
 - **Мониторинг** — метрики в реальном времени, трекинг ошибок
-- **Множественные интерфейсы** — CLI, Web, Telegram
+- **Множественные интерфейсы** — CLI (Web и Telegram — в планах)
 - **Повторяемость** — один и тот же скрипт даёт предсказуемый результат
 
 ### Преимущества v2 перед OpenHands
@@ -538,4 +552,4 @@ agentic-orchestrator-v2/
 ---
 
 > Документ создан для Agentic Orchestrator v2.
-> Актуально для версии с 16 агентами и 23 skill'ами.
+> Актуально для версии с 18 агентами (17 + sub-orchestrator) и 23 skill'ами.

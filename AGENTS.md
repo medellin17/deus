@@ -1,8 +1,10 @@
 # AGENTS.md — Agentic Orchestrator v2
 
+> **Единственный источник правды** по агентам, пайплайнам и Knowledge Base. README.md и ARCHITECTURE.md ссылаются сюда.
+
 ## Обзор
 
-Multi-agent оркестратор на базе OpenCode SDK. Управляет 17 агентами через HTTP API, имеет встроенную Knowledge Base (SQLite + FTS5) для контекста между сессиями.
+Multi-agent оркестратор на базе OpenCode SDK. Управляет 18 агентами (17 + суб-оркестратор) через HTTP API, имеет встроенную Knowledge Base (SQLite + FTS5) для контекста между сессиями.
 
 **Стек:** TypeScript, @opencode-ai/sdk, better-sqlite3, Node.js 20+, tsx
 
@@ -20,21 +22,30 @@ Multi-agent оркестратор на базе OpenCode SDK. Управляе�
 ```
 agentic-orchestrator-v2/
 ├── .opencode/
-│   ├── opencode.json        # Модели + thinking
-│   ├── agents/              # 17 агентов (.md промпты)
-│   └── skills/              # 23 skills
+│   ├── opencode.json          # Модели + thinking
+│   ├── agents/                # 18 агентов (17 + sub-orchestrator)
+│   ├── tools/
+│   │   └── search-code.ts     # Smart Context tool (built-in)
+│   ├── plugins/
+│   │   └── orchestrator-monitor.ts # Плагин мониторинга
+│   └── skills/                # 32 skill'а
 ├── src/
-│   ├── orchestrator.ts      # Основной скрипт
-│   └── kb/                  # Knowledge Base
-│       ├── schema.ts        # SQLite: documents, chunks, FTS5, embeddings, memory_tree
-│       ├── chunker.ts       # Семантический чанкинг по Markdown заголовкам
-│       ├── fts5.ts          # Keyword поиск (BM25)
-│       ├── embeddings.ts    # Gemini gemini-embedding-2 (3072 dim)
-│       ├── memory-tree.ts   # Иерархические саммари (file/module/project)
-│       ├── search.ts        # Гибридный поиск (FTS5 + memory tree)
-│       ├── super-context.ts # Авто-инжект контекста
-│       ├── indexer.ts       # Индексация файлов проекта
-│       └── index.ts         # Public API
+│   ├── orchestrator.ts        # Основной скрипт
+│   ├── types.ts               # Типы SubOrchestratorReport и др.
+│   ├── metrics.ts             # Метрики из плагина
+│   ├── opencode-client.ts     # Адаптер SDK
+│   └── kb/                    # Knowledge Base
+│       ├── schema.ts          # SQLite: documents, chunks, FTS5, embeddings, memory_tree
+│       ├── chunker.ts         # Семантический чанкинг по Markdown заголовкам
+│       ├── fts5.ts            # Keyword поиск (BM25)
+│       ├── embeddings.ts      # Gemini gemini-embedding-2 (3072 dim)
+│       ├── memory-tree.ts     # Иерархические саммари
+│       ├── search.ts          # Гибридный поиск (FTS5 + memory tree)
+│       ├── super-context.ts   # Авто-инжект контекста
+│       ├── indexer.ts         # Индексация файлов
+│       ├── checkpoint.ts      # CheckpointManager
+│       ├── index.ts           # Public API
+│       └── smart-context/     # SmartContextEngine (built-in)
 ├── package.json
 └── tsconfig.json
 ```
@@ -128,11 +139,11 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 
 ### search-code
 
-Инструмент для умного поиска кода на базе [Smart Context Retrieving](https://github.com/medellin17/smart-context-retrieving).
+Встроенный инструмент умного поиска кода на базе SmartContextEngine (BM25 + symbol graph + import graph). Реализован внутри проекта, не требует внешних зависимостей.
 
 - **BM25** — keyword поиск с синонимами
 - **Symbol Graph** — парсинг функций/классов/типов + call_graph
-- **Graph Walk** — 1-2 hops по графу вызовов
+- **Import Graph** — 1-2 hops по графу импортов
 - **Category Weights** — per-category веса для bugfix/feature/refactor
 - **Skeletonization** — сжатие файлов >400 строк до структуры
 
@@ -141,9 +152,8 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 search_code(query="user authentication", project="/path/to/project")
 ```
 
-**Требования:**
-- `npm install smart-context-retrieving` в целевом проекте
-- `npx code-assistant index .` для индексации
+**Индексация:**
+Индексация происходит автоматически при запуске с флагом `--index` или при вызове `indexDirectory()`. Поиск встроен в KB и не требует внешних зависимостей.
 
 ## Добавление агента
 

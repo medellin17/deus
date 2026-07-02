@@ -1,114 +1,94 @@
-import fs from "fs";
-import path from "path";
-
-export interface CompletedDispatch {
-  agent: string;
-  task: string;
-  sessionId?: string;
-  artifactPath?: string;
-  resultSummary?: string;
-}
-
-export interface PendingDispatch {
-  agent: string;
-  task: string;
-  dependsOn?: string[];
-}
-
-export interface CheckpointState {
-  checkpointId: string;
-  task: string;
-  mode: "orchestrate" | "pipeline" | "direct";
-  sessionId: string;
-  parentCheckpointId?: string;
-  completedDispatches: CompletedDispatch[];
-  pendingDispatches: PendingDispatch[];
-  artifacts: string[];
-  contextUsed: number;
-  summaryFile: string;
-  createdAt: string;
-}
+import { TaskManager } from '../state/task-manager.js';
+import type { TaskRow } from '../state/schema.js';
+import { MemoryTree } from './memory-tree.js';
 
 export class CheckpointManager {
-  private baseDir: string;
+  private taskManager: TaskManager;
+  private memoryTree: MemoryTree;
 
-  constructor(projectDir: string) {
-    this.baseDir = path.join(projectDir, ".deus", "checkpoints");
+  constructor(taskManager: TaskManager, memoryTree: MemoryTree) {
+    this.taskManager = taskManager;
+    this.memoryTree = memoryTree;
   }
 
-  save(state: CheckpointState, summary: string): string {
-    const checkpointDir = path.join(this.baseDir, state.checkpointId);
-    fs.mkdirSync(checkpointDir, { recursive: true });
+  /**
+   * Сохраняет чекпоинт: записывает summary в kb_memory_tree.
+   * Если GEMINI_API_KEY установлен — генерирует расширенное саммари через LLM.
+   * @param taskId — ID задачи из таблицы tasks
+   * @param summary — текст саммари
+   * @returns taskId (он же checkpointId)
+   */
+  async save(taskId: string, summary: string): Promise<string> {
+    // Сохраняем raw summary сразу (всегда работает)
+    this.memoryTree.upsert(`checkpoint:${taskId}`, 'checkpoint', summary);
 
-    // Атомарная запись: write to temp → rename
-    const stateTemp = path.join(checkpointDir, "state.tmp");
-    const stateFile = path.join(checkpointDir, "state.json");
-    const summaryFile = path.join(checkpointDir, "summary.md");
-
-    fs.writeFileSync(stateTemp, JSON.stringify(state, null, 2), "utf-8");
-    fs.renameSync(stateTemp, stateFile);
-
-    fs.writeFileSync(summaryFile, summary, "utf-8");
-
-    return state.checkpointId;
-  }
-
-  load(checkpointId: string): { state: CheckpointState; summary: string } | null {
-    const checkpointDir = path.join(this.baseDir, checkpointId);
-    const stateFile = path.join(checkpointDir, "state.json");
-    const summaryFile = path.join(checkpointDir, "summary.md");
-
-    if (!fs.existsSync(stateFile) || !fs.existsSync(summaryFile)) {
-      return null;
-    }
-
-    try {
-      const state: CheckpointState = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
-      const summary = fs.readFileSync(summaryFile, "utf-8");
-      return { state, summary };
-    } catch {
-      return null;
-    }
-  }
-
-  list(): CheckpointState[] {
-    if (!fs.existsSync(this.baseDir)) return [];
-
-    const entries = fs.readdirSync(this.baseDir, { withFileTypes: true });
-    const states: CheckpointState[] = [];
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const stateFile = path.join(this.baseDir, entry.name, "state.json");
-      if (!fs.existsSync(stateFile)) continue;
+    // Опционально — улучшаем саммари через LLM
+    if (process.env.GEMINI_API_KEY) {
       try {
-        const state: CheckpointState = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
-        states.push(state);
+        const { summary: llmSummary } = await this.memoryTree.generateSummary(
+          `checkpoint:${taskId}`,
+          summary
+        );
+        this.memoryTree.upsert(`checkpoint:${taskId}`, 'checkpoint', llmSummary);
       } catch {
-        // skip corrupted
+        // fallback — оставляем raw summary
       }
     }
 
-    // сортировка по createdAt, новые первые
-    states.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return states;
+    return taskId;
   }
 
-  getLatest(): CheckpointState | null {
-    const states = this.list();
-    return states.length > 0 ? states[0] : null;
+  /**
+   * Загружает чекпоинт по taskId.
+   * @returns { task, summary } или null, если задача не найдена
+   */
+  load(taskId: string): { task: TaskRow; summary: string } | null {
+    const task = this.taskManager.getTask(taskId);
+    if (!task) return null;
+
+    const node = this.memoryTree.get(`checkpoint:${taskId}`);
+    return { task, summary: node?.summary ?? '' };
   }
 
-  prune(keepLast: number): void {
-    const states = this.list();
-    if (states.length <= keepLast) return;
+  /**
+   * Возвращает последний чекпоинт (по updated_at в memory_tree).
+   * Пропускает осиротевшие записи (где задача удалена).
+   */
+  getLatest(): { taskId: string; summary: string } | null {
+    const nodes = this.memoryTree.getByLevel('checkpoint');
+    if (nodes.length === 0) return null;
 
-    const toDelete = states.slice(keepLast);
-    for (const state of toDelete) {
-      const dir = path.join(this.baseDir, state.checkpointId);
-      if (fs.existsSync(dir)) {
-        fs.rmSync(dir, { recursive: true, force: true });
+    const sorted = [...nodes].sort((a, b) => b.updated_at - a.updated_at);
+    for (const node of sorted) {
+      const taskId = node.path.replace('checkpoint:', '');
+      const task = this.taskManager.getTask(taskId);
+      if (task) {
+        return { taskId, summary: node.summary };
       }
+    }
+    return null;
+  }
+
+  /**
+   * Возвращает незавершённые задачи (статус pending или running).
+   */
+  listIncomplete(): TaskRow[] {
+    return this.taskManager.getIncompleteTasks();
+  }
+
+  /**
+   * Удаляет старые чекпоинты, оставляя только keepLast последних.
+   * Удаляет как запись из memory_tree, так и задачу из таблицы tasks.
+   */
+  prune(keepLast: number): void {
+    const nodes = this.memoryTree.getByLevel('checkpoint');
+    const sorted = [...nodes].sort((a, b) => b.updated_at - a.updated_at);
+    if (sorted.length <= keepLast) return;
+
+    for (const node of sorted.slice(keepLast)) {
+      const taskId = node.path.replace('checkpoint:', '');
+      this.memoryTree.delete(node.path);
+      this.taskManager.deleteTask(taskId);
     }
   }
 }

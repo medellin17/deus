@@ -92,11 +92,37 @@ function chunkSection(heading: string, level: number, body: string, maxTokens: n
   return chunks;
 }
 
+function mergeSmallSections(
+  sections: { heading: string; level: number; body: string }[],
+  minTokens: number = 500,
+): { heading: string; level: number; body: string }[] {
+  const merged: { heading: string; level: number; body: string }[] = [];
+
+  for (const section of sections) {
+    const tokens = estimateTokens(section.body);
+
+    if (tokens < minTokens && merged.length > 0) {
+      const prev = merged[merged.length - 1];
+      // Only merge if same heading level or parent-child relationship
+      if (prev.level <= section.level) {
+        prev.body += "\n\n" + section.body;
+        // Keep the more specific heading
+        if (section.heading && !prev.heading) prev.heading = section.heading;
+        continue;
+      }
+    }
+    merged.push({ ...section });
+  }
+
+  return merged;
+}
+
 function chunkMarkdown(content: string, maxTokens: number = 3000): Chunk[] {
   if (!content || content.trim().length === 0) {
     return [];
   }
-  const sections = splitByHeaders(content);
+  let sections = splitByHeaders(content);
+  sections = mergeSmallSections(sections);
   const chunks: Chunk[] = [];
 
   for (const section of sections) {

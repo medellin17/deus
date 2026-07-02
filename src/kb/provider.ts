@@ -6,9 +6,10 @@ export interface KbProvider {
   indexDirectory(path: string, extensions?: string[]): void;
   removeFile(path: string): void;
   search(query: string, limit?: number): SearchResult[];
-  getContext(task: string, maxTokens?: number): string;
+  searchCode(query: string, topN?: number): string;
+  getContext(task: string, maxTokens?: number, topK?: number): string;
   hasContext(): boolean;
-  upsertMemory(path: string, level: "file" | "module" | "project", summary: string): void;
+  upsertMemory(path: string, level: "file" | "section" | "project" | "checkpoint", summary: string): void;
   getMemory(path: string): MemoryNode | null;
   stats(): { documents: number; chunks: number; embeddings: number };
   close(): void;

@@ -6,6 +6,7 @@ async function main() {
   console.log("1. Creating session...");
   const sessionRes = await client.session.create({ body: { title: "test-poll" } });
   const sessionId = sessionRes.data?.id;
+  if (!sessionId) throw new Error("Failed to create session");
   console.log("   Session ID:", sessionId);
 
   // 2. Запускаем prompt_async — задача, которая будет выполняться долго
@@ -47,10 +48,11 @@ async function main() {
   if (finalMessages) {
     console.log(`   Финальных сообщений: ${finalMessages.length}`);
     const lastMsg = finalMessages[finalMessages.length - 1];
-    if (lastMsg.info?.finish === "stop") {
+    const finish = lastMsg.info.role === "assistant" ? lastMsg.info.finish : undefined;
+    if (finish === "stop") {
       console.log("   ✅ Сессия завершилась корректно (finish=stop)");
     } else {
-      console.log("   ⚠️ Последнее сообщение finish:", lastMsg.info?.finish);
+      console.log("   ⚠️ Последнее сообщение finish:", finish);
     }
   }
 

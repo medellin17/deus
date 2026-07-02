@@ -2,10 +2,38 @@
 
 > **Связанные планы:** [CONTEXT-OVERFLOW-PLAN.md](./CONTEXT-OVERFLOW-PLAN.md) — Phase 1 (Checkpoints) + Phase 2 (Sub-orchestrators)
 
-Статус: **утверждено пользователем** (28.06.2026)
+Статус: **реализовано** (03.07.2026) — high-приоритетные модули. RAG, Budget, Monitor отложены.
 
 Цель: перейти от простых пайплайнов (3-5 агентов) к сложным задачам на десятки агентов
 с отказоустойчивостью, контрольом бюджета, накопленным контекстом и real-time мониторингом.
+
+## Статус реализации (03.07.2026)
+
+| Модуль | Статус | Примечания |
+|--------|--------|------------|
+| SQLite State Manager | ✅ Реализован | `src/state/` — tasks, task_nodes, session_log, agent_stats |
+| Knowledge Base (FTS5 + Memory Tree) | ✅ Исправлен | KB была на 70-80% готова. Применены 7 фиксов: schema, chunker merge, auto-summary, escapeFts, memory-tree parent_id, super-context limits, type unification |
+| Knowledge Base (RAG/Embeddings) | ⏸️ Отложен | RAG и нормализация эмбеддингов пропущены |
+| Checkpoints (COF Phase 1) | ✅ Реализован | SQLite-based (не файловые JSON). `[CHECKPOINT]` detection + resume |
+| DAG Engine | ✅ Реализован | `src/dag/` — Kahn's algorithm, JSON-шаблоны `{{node_id.result}}`, валидация графа |
+| Retry + fallback | ✅ Реализован | Встроен в DAG Engine (exponential backoff, fallbackAgent на context-limit) |
+| Agent-as-Worker | ✅ Реализован | `runWorker()` + `runDAG()` в orchestrator.ts |
+| Sub-orchestrators (COF Phase 2) | ✅ Реализован | Автономный `[SUBORCH]` signal + ручной `--sub-orch` CLI. Отдельный branch в скилле |
+| Budget controller | ⏸️ Отложен | Статус: «записать, пока не нужно» |
+| Telegram monitor | ⏸️ Отложен | Средний приоритет |
+| Web-панель | ⏸️ Отложен | Низкий приоритет |
+
+### Ключевые отклонения от исходного плана
+
+| План | Реализация | Причина |
+|------|-----------|---------|
+| KB с нуля | KB на 70-80% готова → 7 фиксов | Аудит показал существующую реализацию |
+| DAG `prompt: (results) => string` | JSON-шаблоны `{{node_id.result}}` | Несериализуемые функции нельзя хранить в SQLite |
+| Чекпоинты — файловые JSON | SQLite (таблицы tasks + kb_memory_tree) | Единый источник истины |
+| DB: `.agents/orchestrator.db` | `.deus/kb/orchestrator.db` | Соответствие AGENTS.md |
+| Memory Tree: `'module'` | `'file' \| 'section' \| 'project' \| 'checkpoint'` | Расширенный набор уровней |
+| Retry — отдельный модуль | Встроен в DAG Engine | Архитектурно принадлежит executor-у |
+| Два скилла (conductor + sub-orch) | Один скилл с branch | Single source of truth, нет дублирования |
 
 ---
 
@@ -16,6 +44,9 @@ JSON-файлы для чекпоинтов:缓慢ий поиск при 100+ з
 
 ### Решение
 SQLite вместо JSON-файлов. Один файл `.agents/orchestrator.db`, ACID, WAL mode.
+
+> **Статус: ✅ Реализован.** `src/state/schema.ts`, `src/state/task-manager.ts`, `src/state/index.ts`.
+> БД: `.deus/kb/orchestrator.db` (единая с KB). Добавлены колонки `depends_on`, `prompt` в task_nodes.
 
 ### Схема БД
 
@@ -99,6 +130,11 @@ FROM task_nodes GROUP BY agent;
 ---
 
 ## 2. Knowledge Base (FTS5 + RAG + Memory Tree)
+
+> **Статус: ✅ Исправлен (был на 70-80% готов).** RAG/embeddings — ⏸️ отложен.
+> Применены фиксы: schema (parent_id, updated_at, tokenize, CHECK), chunker (merge <500 токенов),
+> memory-tree (auto-summary via Gemini 2.0 Flash), super-context (3000 токенов, configurable topK),
+> fts5 (escapeFts fix), search (LIMIT), index (type unification).
 
 ### Проблема
 При каждом запуске задачи оркестратор "заново" знакомится с проектом. Нет накопленного контекста.
@@ -276,6 +312,10 @@ async getSuperContext(task: string): Promise<SuperContext> {
 ### Решение
 Граф зависимостей вместо линейных цепочек.
 
+> **Статус: ✅ Реализован.** `src/dag/types.ts`, `src/dag/engine.ts`, `src/dag/index.ts`.
+> **Изменение:** `prompt` — строка с шаблонами `{{node_id.result}}` вместо функции (сериализуемо в JSON/SQLite).
+> **Алгоритм:** Kahn's algorithm + parallel batch execution (maxConcurrent). Валидация графа (циклы, duplicates, missing deps).
+
 ```typescript
 interface TaskNode {
   id: string;
@@ -328,6 +368,10 @@ start ───┼─ researcher-crewai   ──┼─── analyst ───�
 Оркестратор только **назначает воркеров** и **агрегирует результаты**.
 Каждый воркер — изолированная сессия со своей задачей.
 
+> **Статус: ✅ Реализован.** `runWorker()` + `runDAG()` в `src/orchestrator.ts`.
+> Sub-orchestrators (COF Phase 2) реализованы: автономный `[SUBORCH]` signal + `--sub-orch` CLI.
+> Sub-orchestrator грузит тот же скилл `agentic-orchestrator` с branch-секцией.
+
 ```typescript
 const researchResults = await Promise.all([
   runWorker({ agent: "researcher-explorer", prompt: "Исследуй LangChain" }),
@@ -356,7 +400,7 @@ Sub-Orchestrator при переполнении контекста исполь
 ### Иерархические подоркестраторы (для 50+ агентов)
 
 ```
-Глобальный оркестратор (mimo-v2.5-pro)
+Глобальный оркестратор (opencode-go/deepseek-v4-pro)
 ├── Research-оркестратор (10 агентов)
 │   ├── researcher-explorer × 5
 │   ├── content-writer × 3
@@ -381,6 +425,10 @@ Sub-Orchestrator при переполнении контекста исполь
 ### Решение
 Автоматические повторы и запасные агенты.
 
+> **Статус: ✅ Реализован.** Встроен в `DAGEngine.executeNode()`.
+> Exponential backoff: 0/5/10/20 сек. FallbackAgent только на context-limit ошибки.
+> Critical nodes (default: true) — failure прерывает граф.
+
 ```typescript
 interface RetryConfig {
   retries: number;        // макс. попыток (default 2)
@@ -404,6 +452,8 @@ interface RetryConfig {
 ---
 
 ## 6. Budget-aware orchestration
+
+> **Статус: ⏸️ Отложен.** Не входил в high-приоритетную реализацию.
 
 ### Проблема
 Крупные задачи могут стоить $5-50. Нет контроля над расходами.
@@ -432,6 +482,8 @@ interface OrchestratorConfig {
 ---
 
 ## 7. Real-time мониторинг
+
+> **Статус: ⏸️ Отложен.** Telegram (средний) и Web (низкий) приоритет — не реализованы.
 
 ### Проблема
 При 30+ агентах непонятно, что происходит. Нет прогресса.
@@ -474,37 +526,36 @@ interface ProgressUpdate {
 
 ```
 orchestrator-cli
-├── SQLite State        # задачи, ноды, аналитика
-├── Knowledge Base      # FTS5 + RAG + Memory Tree
-│   ├── FTS5 Index      # keyword search (BM25)
-│   ├── Embeddings      # Gemini (3072 dim)
-│   └── Memory Tree     # hierarchical summaries
-├── Checkpoint Manager  # COF Phase 1: чекпоинты + resume
-├── DAG Engine          # топологическая сортировка, выполнение
-├── Worker Pool         # пул параллельных сессий
-├── Retry Engine        # повторы, fallback
-├── Budget Controller   # контроль стоимости
-├── Monitor             # Telegram + Web (потом)
-└── Sub-Orchestrators   # COF Phase 2: иерархия для 50+ агентов
+├── SQLite State        # ✅ src/state/ — tasks, task_nodes, session_log, agent_stats
+├── Knowledge Base      # ✅ src/kb/ — FTS5 + Memory Tree (RAG ⏸️)
+│   ├── FTS5 Index      # ✅ keyword search (BM25, porter unicode61)
+│   ├── Embeddings      # ⏸️ Gemini (отложен)
+│   └── Memory Tree     # ✅ hierarchical summaries + auto-summary via LLM
+├── Checkpoint Manager  # ✅ COF Phase 1: SQLite-based чекпоинты + resume
+├── DAG Engine          # ✅ Kahn's algorithm + retry/fallback + prompt templates
+├── Worker Pool         # ✅ runWorker() — изолированные сессии
+├── Retry Engine        # ✅ внутри DAG Engine (не отдельный модуль)
+├── Budget Controller   # ⏸️ отложен
+├── Monitor             # ⏸️ Telegram + Web (отложены)
+└── Sub-Orchestrators   # ✅ COF Phase 2: [SUBORCH] signal + --sub-orch CLI
 ```
 
 ### Порядок реализации
 
-| # | Модуль | Сложность | Приоритет | Зависит от |
-|---|--------|-----------|-----------|------------|
-| 1a | SQLite State Manager | средняя | высокий | — |
-| 1b | Knowledge Base (FTS5) | средняя | высокий | SQLite |
-| 1c | Knowledge Base (RAG + Gemini) | средняя | высокий | SQLite |
-| 1d | Knowledge Base (Memory Tree) | средняя | высокий | SQLite, LLM |
-| 1e | SuperContext Pipeline | средняя | высокий | FTS5 + RAG |
-| 1f | Checkpoints (COF Phase 1) | средняя | высокий | SQLite |
-| 2 | DAG Engine | высокая | высокий | SQLite, Checkpoints |
-| 3 | Retry + fallback | средняя | высокий | SQLite |
-| 4 | Agent-as-Worker | средняя | высокий | DAG |
-| 5 | Budget controller | низкая | записать | SQLite |
-| 6 | Telegram monitor | средняя | средний | — |
-| 7 | Sub-orchestrators (COF Phase 2) | высокая | высокий | DAG, SQLite, KB, Checkpoints |
-| 8 | Web-панель | высокая | низкий | — |
+| # | Модуль | Статус | Файлы |
+|---|--------|--------|-------|
+| 1a | SQLite State Manager | ✅ | `src/state/schema.ts`, `src/state/task-manager.ts`, `src/state/index.ts` |
+| 1b | Knowledge Base (FTS5 fixes) | ✅ | `src/kb/schema.ts`, `src/kb/chunker.ts`, `src/kb/fts5.ts` |
+| 1c | Knowledge Base (RAG) | ⏸️ | Отложен |
+| 1d | Knowledge Base (Memory Tree fixes) | ✅ | `src/kb/memory-tree.ts`, `src/kb/super-context.ts` |
+| 1e | SuperContext Pipeline | ✅ | `src/kb/super-context.ts`, `src/kb/search.ts` |
+| 1f | Checkpoints (COF Phase 1) | ✅ | `src/kb/checkpoint.ts` (SQLite rewrite), `src/orchestrator.ts` |
+| 2 | DAG Engine | ✅ | `src/dag/types.ts`, `src/dag/engine.ts`, `src/dag/index.ts` |
+| 3 | Retry + fallback | ✅ | Внутри `src/dag/engine.ts` |
+| 4 | Agent-as-Worker + Sub-orchestrators | ✅ | `src/orchestrator.ts` (runWorker, runDAG, [SUBORCH]), `.opencode/agents/sub-orchestrator.md` |
+| 5 | Budget controller | ⏸️ | Отложен |
+| 6 | Telegram monitor | ⏸️ | Отложен |
+| 7 | Web-панель | ⏸️ | Отложен |
 
 ---
 
@@ -542,4 +593,17 @@ doc-scaffold
 ├── reviewer-critic × 3        (параллельно: review каждого раздела)
 ├── content-writer × 2         (доработка по замечаниям)
 └── integrator-qa × 2          (сборка + проверка ссылок)
+
+### Сценарий D: "Мульти-доменная задача через sub-orchestrators" (реализовано)
+
+Conductor определяет 2+ домена → `[SUBORCH]` → parallel sub-orchestrators → synthesis.
+
+```
+Main Conductor
+├── Sub-Orchestrator: Auth (5 агентов)
+│   └── researcher → architect → implementer → reviewer → qa
+├── Sub-Orchestrator: Frontend (5 агентов)
+│   └── researcher → architect → implementer → reviewer → qa
+└── Synthesis → Cross-domain QA → Final Report
+```
 ```

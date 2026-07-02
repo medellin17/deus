@@ -8,7 +8,12 @@ export interface FTS5Result {
 }
 
 export function escapeFts(query: string): string {
-  return `"${query.replace(/"/g, '""').replace(/\b(AND|OR|NOT|NEAR)\b/gi, '').replace(/[*()]/g, '')}"`;
+  // FTS5 treats AND, OR, NOT, NEAR as operators — keep them
+  // Only escape special chars that cause syntax errors
+  return query
+    .replace(/"/g, '""')   // escape double-quotes for FTS5 phrase
+    .replace(/[()]/g, '')  // remove bare parentheses (not needed for simple queries)
+    .replace(/\*/g, '');   // remove wildcard asterisks
 }
 
 export class FTS5Index {

@@ -8,12 +8,12 @@ export class SuperContext {
     this.db = db;
   }
 
-  getContext(task: string, maxTokens: number = 2000): string {
+  getContext(task: string, maxTokens: number = 3000, topK: number = 5): string {
     const chunks = this.db
       .prepare(
-        "SELECT rowid, content, heading, rank FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ? ORDER BY rank LIMIT 5"
+        "SELECT rowid, content, heading, rank FROM kb_chunks_fts WHERE kb_chunks_fts MATCH ? ORDER BY rank LIMIT ?"
       )
-      .all(escapeFts(task)) as Array<{
+      .all(escapeFts(task), topK) as Array<{
       rowid: number;
       content: string;
       heading: string;
@@ -23,9 +23,9 @@ export class SuperContext {
     const escapedTask = task.replace(/[%_]/g, "\\$&");
     const summaries = this.db
       .prepare(
-        "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? ESCAPE '\\' LIMIT 5"
+        "SELECT path, summary FROM kb_memory_tree WHERE summary LIKE ? ESCAPE '\\' LIMIT ?"
       )
-      .all(`%${escapedTask}%`) as Array<{ path: string; summary: string }>;
+      .all(`%${escapedTask}%`, topK) as Array<{ path: string; summary: string }>;
 
     const projectSummary = this.db
       .prepare(

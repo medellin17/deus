@@ -19,3 +19,4 @@
 | `security-auditor` | Security scanning. | `read`, `grep`, `bash` | flash |
 | `doc-maintainer` | Documentation updates. | `read`, `write`, `edit`, `glob`, `bash` | flash |
 | `skills-indexer` | Skills discovery and indexing. | `read`, `write`, `glob`, `bash` | flash |
+| `sub-orchestrator` | Domain-scoped conductor. Executes sub-tasks, returns structured reports. | `task`, `skill` | flash |
