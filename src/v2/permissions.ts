@@ -99,8 +99,8 @@ export const DEFAULT_POLICY: PermissionPolicy = {
 };
 
 /**
- * Last matching rule wins. This makes policy files able to add explicit
- * exceptions after the built-in deny rules.
+ * Rules are checked in order and the last matching rule wins. Therefore a
+ * policy file can add explicit exceptions after the built-in deny rules.
  */
 export function decidePermission(
   policy: PermissionPolicy,
