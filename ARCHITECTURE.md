@@ -57,30 +57,37 @@
 │  └──┬───┘  └──────┬───────┘  └───────┬───────┘               │
 │     └─────────────┼──────────────────┘                        │
 │                   ▼                                           │
-│  ┌──────────────────────────────────────┐                    │
-│  │  orchestrator.ts (Node.js SDK)      │                    │
-│  │  • runPipeline() / runParallel()    │                    │
-│  │  • runSequential() / runDirect()    │                    │
-│  │  • --resume / --checkpoint          │                    │
-│  └──────────────┬───────────────────────┘                    │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  orchestrator.ts (Node.js SDK)                      │    │
+│  │  • runOrchestrate() / runPipeline() / runParallel() │    │
+│  │  • runDirect() / runDAG() / spawnSubOrchestrators() │    │
+│  │  • --resume / --checkpoint / auto-resume loop       │    │
+│  └──────────────┬───────────────────────────────────────┘    │
 │                 │ HTTP (localhost:4096)                       │
 │  ┌──────────────▼───────────────────────┐                    │
 │  │  opencode serve                      │                    │
 │  │  ┌─────────────────────────────────┐ │                    │
-│  │  │ 17 агентов + sub-orchestrator  │ │                    │
-│  │  │ 23 skills                       │ │                    │
+│  │  │ 18 агентов + sub-orchestrator  │ │                    │
+│  │  │ 32 skills                       │ │                    │
 │  │  │ Plugin: orchestrator-monitor    │ │                    │
 │  │  └─────────────────────────────────┘ │                    │
 │  └──────────────┬───────────────────────┘                    │
 │                 ▼                                             │
-│  ┌──────────────────────────────────────┐                    │
-│  │  Knowledge Base (SQLite + FTS5)     │                    │
-│  │  • BM25 search (keyword)            │                    │
-│  │  • Memory Tree (summaries)          │                    │
-│  │  • Smart Context (symbol/import)    │                    │
-│  │  • Checkpoints (state + summary)    │                    │
-│  │  • Sub-orchestrator reports         │                    │
-│  └──────────────────────────────────────┘                    │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Persistence (SQLite)                                 │  │
+│  │  ┌────────────────────┐  ┌──────────────────────────┐ │  │
+│  │  │ Knowledge Base     │  │ State DB                 │ │  │
+│  │  │ • BM25 / FTS5      │  │ • tasks                  │ │  │
+│  │  │ • Memory Tree      │  │ • task_nodes             │ │  │
+│  │  │ • Embeddings (opt) │  │ • session_log            │ │  │
+│  │  │ • Smart Context    │  │ • agent_stats            │ │  │
+│  │  └────────────────────┘  └──────────────────────────┘ │  │
+│  │  ┌────────────────────┐  ┌──────────────────────────┐ │  │
+│  │  │ metrics.db         │  │ CheckpointManager        │ │  │
+│  │  │ • sessions         │  │ • tasks.graph +          │ │  │
+│  │  │ • metric counters  │  │   kb_memory_tree         │ │  │
+│  │  └────────────────────┘  └──────────────────────────┘ │  │
+│  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,11 +112,17 @@ orchestrator.ts ──HTTP──▶ opencode serve ──▶ Агент (сес�
 
 | Компонент | Тип | Описание |
 |---|---|---|
-| `orchestrator.ts` | Скрипт | Оркестратор пайплайнов, управление сессиями |
+| `orchestrator.ts` | Скрипт | Оркестратор пайплайнов, CLI, управление сессиями, auto-resume |
+| `opencode-client.ts` | Адаптер | Синглтон `@opencode-ai/sdk` |
+| `DAGEngine` | Движок | Выполнение DAG графа: топология, параллелизм, retry, fallback |
+| `TaskManager` / `StateDatabase` | State | SQLite-хранилище задач, нод, логов сессий, статистики агентов |
+| `CheckpointManager` | State | Сохранение/загрузка чекпоинтов через Memory Tree + tasks |
+| `RagKbProvider` | KB | Фасад Knowledge Base: индексация, поиск, Smart Context, embeddings |
 | `orchestrator-monitor.ts` | Плагин | Мониторинг lifecycle сессий, сбор метрик |
+| `metrics.ts` | Метрики | SQLite `metrics.db` для плагина |
 | `opencode.json` | Конфиг | Модели и thinking для каждого агента |
-| `agents/*.md` | Промпты | Определения 17 агентов + sub-orchestrator |
-| `skills/*/SKILL.md` | Промпты | Определения 23 skill'ов |
+| `agents/*.md` | Промпты | Определения 18 агентов (17 + sub-orchestrator) |
+| `skills/*/SKILL.md` | Промпты | Определения 32 skill'ов |
 
 ---
 
@@ -119,22 +132,18 @@ orchestrator.ts ──HTTP──▶ opencode serve ──▶ Агент (сес�
 
 | Агент | Модель | thinking |
 |---|---|---|
-| `orchestrator-conductor` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
+| `orchestrator-conductor` | `opencode-go/deepseek-v4-flash` | `reasoningEffort: max` |
 | `architect-planner-pro` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
 | `reviewer-critic-pro` | `opencode-go/deepseek-v4-pro` | `reasoningEffort: max` |
-| Остальные 15 агентов | `opencode-go/deepseek-v4-flash` | `reasoningEffort: max` |
+| Остальные 16 агентов | `opencode-go/deepseek-v4-flash` | `reasoningEffort: max` |
 
 ### Почему два класса моделей
 
-**Pro-модель** (`opencode-go/deepseek-v4-pro`) используется для агентов, принимающих стратегические решения:
-- `orchestrator-conductor` — декомпозирует задачи, выбирает пайплайны, проверяет результаты
+**Pro-модель** (`opencode-go/deepseek-v4-pro`) используется для high-stakes агентов:
 - `architect-planner-pro` — проектирует архитектуру для сложных/критичных задач
+- `reviewer-critic-pro` — ревьюит критичные участки (auth, payments, security)
 
-**Базовая модель** (`opencode-go/deepseek-v4-flash`) используется для агентов, выполняющих конкретную работу:
-- `implementer-builder` — пишет код
-- `reviewer-critic` — ревьюит код
-- `researcher-explorer` — исследует кодовую базу
-- Все остальные агенты
+**Базовая модель** (`opencode-go/deepseek-v4-flash`) используется для всех остальных агентов, включая `orchestrator-conductor`, `implementer-builder`, `reviewer-critic`, `researcher-explorer` и остальных.
 
 ### Особенность: адаптация промптов
 
@@ -414,8 +423,8 @@ console.log(`Средняя длительность: ${metrics.avgDuration}ms`)
 
 | Компонент | Статус |
 |---|---|
-| `agents/*.md` (16 файлов) | Без изменений |
-| `skills/*/SKILL.md` (23 файла) | Без изменений |
+| `agents/*.md` | Базовые промпты без изменений |
+| `skills/*/SKILL.md` (32 skill'а) | Без изменений |
 | `.opencode/opencode.json` | Без изменений |
 | `.opencode/agents/*.md` | Без изменений |
 | `.opencode/skills/*/SKILL.md` | Без изменений |
@@ -496,6 +505,14 @@ agentic-orchestrator-v2/
 │   ├── types.ts                   # Типы SubOrchestratorReport и др.
 │   ├── metrics.ts                 # Метрики из плагина мониторинга
 │   ├── opencode-client.ts         # Адаптер над @opencode-ai/sdk
+│   ├── dag/                       # DAG-движок
+│   │   ├── engine.ts              # Выполнение графа
+│   │   ├── types.ts               # TaskGraph, TaskNodeDefinition
+│   │   └── index.ts
+│   ├── state/                     # State DB
+│   │   ├── schema.ts              # tasks, task_nodes, session_log, agent_stats
+│   │   ├── task-manager.ts        # CRUD задач/нод/логов
+│   │   └── index.ts
 │   └── kb/                        # Knowledge Base (SQLite + FTS5)
 │       ├── schema.ts              # SQLite схема
 │       ├── chunker.ts             # Семантический чанкинг
@@ -532,7 +549,10 @@ agentic-orchestrator-v2/
 | **Режимы работы** | OpenCode UI | CLI (Web/TG — future) | Web UI |
 | **Модели** | 2 класса (pro/base) | 2 класса (pro/base) | Зависит от конфига |
 | **Агенты** | 16 | 18 (17 + sub-orchestrator) | Зависит от конфига |
-| **Skill'ы** | 23 | 23 | Нет аналога |
+| **Skill'ы** | 23 | 32 | Нет аналога |
+| **DAG execution** | Нет | `DAGEngine` + `--dag` | Зависит от конфига |
+| **State DB / checkpoints** | Нет | SQLite `tasks` + `kb_memory_tree` | Зависит от конфига |
+| **Smart Context** | Нет | Встроен в KB | Зависит от конфига |
 
 ### Преимущества v2 перед v1
 
@@ -552,4 +572,4 @@ agentic-orchestrator-v2/
 ---
 
 > Документ создан для Agentic Orchestrator v2.
-> Актуально для версии с 18 агентами (17 + sub-orchestrator) и 23 skill'ами.
+> Актуально для версии с 18 агентами (17 + sub-orchestrator) и 32 skill'ами.

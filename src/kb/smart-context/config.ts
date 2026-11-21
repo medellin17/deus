@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import type { Config, QueryCategory, Confidence, SearchWeights } from './types.ts';
 
 function getDefaultConfigPath(): string {
@@ -19,27 +19,41 @@ export function loadConfig(userPath?: string): Config {
   try {
     raw = fs.readFileSync(configPath, 'utf-8');
   } catch (err) {
+    if (isErrnoException(err) && err.code === 'ENOENT') {
+      return normalizeConfig({});
+    }
     console.warn(`Warning: failed to read config from ${configPath}: ${err instanceof Error ? err.message : err}. Using defaults.`);
     return normalizeConfig({});
   }
-  const parsed = yaml.load(raw) as any; // reason: parsed external data
-  return normalizeConfig(parsed);
+  const parsed = yaml.load(raw) as Record<string, unknown> | null | undefined;
+  return normalizeConfig(parsed ?? {});
 }
 
-export function normalizeCategoryWeights(catWeights: any /* reason: parsed external data */): SearchWeights {
+function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && 'code' in err;
+}
+
+export function normalizeCategoryWeights(catWeights: unknown): SearchWeights {
   const keys: (keyof SearchWeights)[] = ['text', 'symbol', 'import', 'ema', 'hub', 'path'];
   const defaults: Record<string, number> = { text: 0.0, symbol: 0.0, import: 0.0, ema: 0.0, hub: 0.0, path: 0.3 };
 
-  const result = {} as SearchWeights;
+  const result: SearchWeights = { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 };
+  if (!catWeights || typeof catWeights !== 'object' || Array.isArray(catWeights)) {
+    return normalizeCategoryWeights({});
+  }
+  const rawWeights = catWeights as Record<string, unknown>;
   for (const key of keys) {
-    let val = catWeights[key];
-    if (val === undefined || val === null) {
+    const rawVal = rawWeights[key];
+    let val: number;
+    if (rawVal === undefined || rawVal === null) {
       val = defaults[key];
     } else {
-      val = Number(val);
-      if (!isFinite(val) || val < 0) {
-        console.warn(`Warning: weight "${key}" is invalid (${catWeights[key]}). Treating as 0.`);
+      const num = Number(rawVal);
+      if (!isFinite(num) || num < 0) {
+        console.warn(`Warning: weight "${key}" is invalid (${rawVal}). Treating as 0.`);
         val = 0;
+      } else {
+        val = num;
       }
     }
     result[key] = val;
@@ -59,22 +73,37 @@ export function normalizeCategoryWeights(catWeights: any /* reason: parsed exter
   };
 }
 
-function clamp01(val: unknown, defaultVal: number, name: string): number {
+function asRecord(val: unknown): Record<string, unknown> | undefined {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return undefined;
+  return val as Record<string, unknown>;
+}
+
+function asStringArray(val: unknown, defaultVal: string[]): string[] {
+  if (Array.isArray(val) && val.every((v): v is string => typeof v === 'string')) return val;
+  return defaultVal;
+}
+
+function asNumber(val: unknown, defaultVal: number): number {
   if (val === undefined || val === null) return defaultVal;
   const num = Number(val);
-  if (!isFinite(num) || num < 0 || num > 1) {
+  return isFinite(num) ? num : defaultVal;
+}
+
+function clamp01(val: unknown, defaultVal: number, name: string): number {
+  const num = asNumber(val, defaultVal);
+  if (num < 0 || num > 1) {
     console.warn(`Warning: ${name} must be between 0 and 1, got ${val}. Clamping to [0, 1].`);
     return Math.max(0, Math.min(1, num));
   }
   return num;
 }
 
-function normalizeConfig(raw: any /* reason: parsed external data */): Config {
+function normalizeConfig(raw: unknown): Config {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Config must be an object');
   }
-
-  const rawWeights = raw.weights ?? {};
+  const obj = raw as Record<string, unknown>;
+  const rawWeights = asRecord(obj.weights) ?? {};
   const categories: QueryCategory[] = ['default', 'bugfix', 'feature', 'refactor', 'style', 'config'];
 
   const baseWeights: Record<QueryCategory, Record<string, number>> = {
@@ -86,59 +115,75 @@ function normalizeConfig(raw: any /* reason: parsed external data */): Config {
     config: { text: 0.5, symbol: 0.1, import: 0.2, ema: 0.1, hub: 0.05, path: 0.3 },
   };
 
-  const weights = {} as Config['weights'];
+  const weights: Config['weights'] = {
+    default: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+    bugfix: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+    feature: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+    refactor: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+    style: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+    config: { text: 0, symbol: 0, import: 0, ema: 0, hub: 0, path: 0 },
+  };
   for (const cat of categories) {
-    const combined = { ...baseWeights[cat], ...rawWeights[cat] };
+    const combined = { ...baseWeights[cat], ...asRecord(rawWeights[cat]) };
     weights[cat] = normalizeCategoryWeights(combined);
   }
+
+  const indexing = asRecord(obj.indexing);
+  const search = asRecord(obj.search);
+  const model = asRecord(obj.model);
+  const ema = asRecord(obj.ema);
+  const confidence = asRecord(obj.confidence);
+  const contextTiers = asRecord(obj.contextTiers);
+  const synonyms = asRecord(obj.synonyms);
+
   return {
     indexing: {
-      ignore: raw.indexing?.ignore ?? ['node_modules', 'dist', '.git'],
-      maxFileSizeKb: raw.indexing?.maxFileSizeKb ?? 500,
-      workers: raw.indexing?.workers ?? 0,
+      ignore: asStringArray(indexing?.ignore, ['node_modules', 'dist', '.git']),
+      maxFileSizeKb: asNumber(indexing?.maxFileSizeKb, 500),
+      workers: asNumber(indexing?.workers, 0),
     },
     search: {
-      dependencyDepth: raw.search?.dependencyDepth ?? 2,
-      bm25Limit: raw.search?.bm25Limit ?? 20,
-      graphWalkMinScore: raw.search?.graphWalkMinScore ?? 0.3,
-      graphWalkMaxSymbols: raw.search?.graphWalkMaxSymbols ?? 20,
-      sessionTimeoutMin: raw.search?.sessionTimeoutMin ?? 10,
-      sessionHistoryLength: raw.search?.sessionHistoryLength ?? 5,
-      chunkMergeDistanceLines: raw.search?.chunkMergeDistanceLines ?? 20,
-      skeletonThresholdLines: raw.search?.skeletonThresholdLines ?? 400,
+      dependencyDepth: asNumber(search?.dependencyDepth, 2),
+      bm25Limit: asNumber(search?.bm25Limit, 20),
+      graphWalkMinScore: asNumber(search?.graphWalkMinScore, 0.3),
+      graphWalkMaxSymbols: asNumber(search?.graphWalkMaxSymbols, 20),
+      sessionTimeoutMin: asNumber(search?.sessionTimeoutMin, 10),
+      sessionHistoryLength: asNumber(search?.sessionHistoryLength, 5),
+      chunkMergeDistanceLines: asNumber(search?.chunkMergeDistanceLines, 20),
+      skeletonThresholdLines: asNumber(search?.skeletonThresholdLines, 400),
     },
     model: {
-      contextWindow: raw.model?.contextWindow ?? 128000,
-      outputReserve: raw.model?.outputReserve ?? 4096,
+      contextWindow: asNumber(model?.contextWindow, 128000),
+      outputReserve: asNumber(model?.outputReserve, 4096),
     },
     weights,
     ema: {
-      alphaFast: clamp01(raw.ema?.alphaFast, 0.3, 'ema.alphaFast'),
-      alphaSlow: clamp01(raw.ema?.alphaSlow, 0.1, 'ema.alphaSlow'),
-      sampleThreshold: raw.ema?.sampleThreshold ?? 50,
-      explorationBonus: raw.ema?.explorationBonus ?? 0.05,
+      alphaFast: clamp01(ema?.alphaFast, 0.3, 'ema.alphaFast'),
+      alphaSlow: clamp01(ema?.alphaSlow, 0.1, 'ema.alphaSlow'),
+      sampleThreshold: asNumber(ema?.sampleThreshold, 50),
+      explorationBonus: asNumber(ema?.explorationBonus, 0.05),
     },
     confidence: {
-      extracted: raw.confidence?.extracted ?? 1.0,
-      inferred: raw.confidence?.inferred ?? 0.6,
-      ambiguous: raw.confidence?.ambiguous ?? 0.3,
+      extracted: asNumber(confidence?.extracted, 1.0),
+      inferred: asNumber(confidence?.inferred, 0.6),
+      ambiguous: asNumber(confidence?.ambiguous, 0.3),
     },
     contextTiers: {
       tier1: {
-        ratio: clamp01(raw.contextTiers?.tier1?.ratio, 0.6, 'contextTiers.tier1.ratio'),
-        maxFiles: raw.contextTiers?.tier1?.maxFiles ?? 5,
+        ratio: clamp01(asRecord(contextTiers?.tier1)?.ratio, 0.6, 'contextTiers.tier1.ratio'),
+        maxFiles: asNumber(asRecord(contextTiers?.tier1)?.maxFiles, 5),
       },
       tier2: {
-        ratio: clamp01(raw.contextTiers?.tier2?.ratio, 0.3, 'contextTiers.tier2.ratio'),
-        maxFiles: raw.contextTiers?.tier2?.maxFiles ?? 8,
+        ratio: clamp01(asRecord(contextTiers?.tier2)?.ratio, 0.3, 'contextTiers.tier2.ratio'),
+        maxFiles: asNumber(asRecord(contextTiers?.tier2)?.maxFiles, 8),
       },
       tier3: {
-        ratio: clamp01(raw.contextTiers?.tier3?.ratio, 0.1, 'contextTiers.tier3.ratio'),
-        maxFiles: raw.contextTiers?.tier3?.maxFiles ?? 50,
+        ratio: clamp01(asRecord(contextTiers?.tier3)?.ratio, 0.1, 'contextTiers.tier3.ratio'),
+        maxFiles: asNumber(asRecord(contextTiers?.tier3)?.maxFiles, 50),
       },
-      truncateRatio: clamp01(raw.contextTiers?.truncateRatio, 0.95, 'contextTiers.truncateRatio'),
+      truncateRatio: clamp01(contextTiers?.truncateRatio, 0.95, 'contextTiers.truncateRatio'),
     },
-    synonyms: raw.synonyms ?? {},
+    synonyms: (synonyms as Record<string, string[]> | undefined) ?? {},
   };
 }
 

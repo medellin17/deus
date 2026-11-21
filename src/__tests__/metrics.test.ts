@@ -26,8 +26,8 @@ beforeEach(() => {
   process.chdir(tempDir);
 });
 
-afterEach(() => {
-  closeMetrics();
+afterEach(async () => {
+  await closeMetrics();
   process.chdir(originalCwd);
   try {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -37,30 +37,30 @@ afterEach(() => {
 });
 
 void describe("metrics module", () => {
-  void it("incrementMetric increases value by delta", () => {
-    incrementMetric("totalCreated", 1);
-    incrementMetric("totalCreated", 1);
-    assert.strictEqual(getMetric("totalCreated"), 2);
+  void it("incrementMetric increases value by delta", async () => {
+    await incrementMetric("totalCreated", 1);
+    await incrementMetric("totalCreated", 1);
+    assert.strictEqual(await getMetric("totalCreated"), 2);
   });
 
-  void it("incrementMetric defaults to delta=1", () => {
-    incrementMetric("totalCreated");
-    assert.strictEqual(getMetric("totalCreated"), 1);
+  void it("incrementMetric defaults to delta=1", async () => {
+    await incrementMetric("totalCreated");
+    assert.strictEqual(await getMetric("totalCreated"), 1);
   });
 
-  void it("setMetric sets a specific value", () => {
-    setMetric("activeSessions", 5);
-    assert.strictEqual(getMetric("activeSessions"), 5);
+  void it("setMetric sets a specific value", async () => {
+    await setMetric("activeSessions", 5);
+    assert.strictEqual(await getMetric("activeSessions"), 5);
   });
 
-  void it("getMetrics returns all expected keys with correct values", () => {
-    setMetric("totalCreated", 3);
-    setMetric("totalCompleted", 2);
-    setMetric("totalFailed", 1);
-    setMetric("activeSessions", 4);
-    setMetric("avgDurationMs", 1500);
+  void it("getMetrics returns all expected keys with correct values", async () => {
+    await setMetric("totalCreated", 3);
+    await setMetric("totalCompleted", 2);
+    await setMetric("totalFailed", 1);
+    await setMetric("activeSessions", 4);
+    await setMetric("avgDurationMs", 1500);
 
-    const metrics = getMetrics();
+    const metrics = await getMetrics();
     assert.strictEqual(metrics.totalCreated, 3);
     assert.strictEqual(metrics.totalCompleted, 2);
     assert.strictEqual(metrics.totalFailed, 1);
@@ -68,46 +68,46 @@ void describe("metrics module", () => {
     assert.strictEqual(metrics.avgDurationMs, 1500);
   });
 
-  void it("getMetric returns 0 for unknown key", () => {
-    assert.strictEqual(getMetric("nonexistent"), 0);
+  void it("getMetric returns 0 for unknown key", async () => {
+    assert.strictEqual(await getMetric("nonexistent"), 0);
   });
 
-  void it("updateAvgDuration handles first completion (completed=0)", () => {
-    setMetric("totalCompleted", 0);
-    updateAvgDuration(1000);
-    assert.strictEqual(getMetric("avgDurationMs"), 1000);
+  void it("updateAvgDuration handles first completion (completed=0)", async () => {
+    await setMetric("totalCompleted", 0);
+    await updateAvgDuration(1000);
+    assert.strictEqual(await getMetric("avgDurationMs"), 1000);
   });
 
-  void it("updateAvgDuration handles second completion (completed=1)", () => {
-    setMetric("totalCompleted", 0);
-    updateAvgDuration(1000);
+  void it("updateAvgDuration handles second completion (completed=1)", async () => {
+    await setMetric("totalCompleted", 0);
+    await updateAvgDuration(1000);
     // Simulate second completion: totalCompleted incremented to 1
-    setMetric("totalCompleted", 1);
-    updateAvgDuration(2000);
-    assert.strictEqual(getMetric("avgDurationMs"), 2000);
+    await setMetric("totalCompleted", 1);
+    await updateAvgDuration(2000);
+    assert.strictEqual(await getMetric("avgDurationMs"), 2000);
   });
 
-  void it("updateAvgDuration computes running average for 3+ completions", () => {
+  void it("updateAvgDuration computes running average for 3+ completions", async () => {
     // Setup: first two completions to establish baseline
-    setMetric("totalCompleted", 0);
-    updateAvgDuration(1000);
-    setMetric("totalCompleted", 1);
-    updateAvgDuration(2000);
+    await setMetric("totalCompleted", 0);
+    await updateAvgDuration(1000);
+    await setMetric("totalCompleted", 1);
+    await updateAvgDuration(2000);
 
     // Third completion: totalCompleted = 2
     // avg = 2000 + (3000 - 2000) / 2 = 2500
-    setMetric("totalCompleted", 2);
-    updateAvgDuration(3000);
-    assert.strictEqual(getMetric("avgDurationMs"), 2500);
+    await setMetric("totalCompleted", 2);
+    await updateAvgDuration(3000);
+    assert.strictEqual(await getMetric("avgDurationMs"), 2500);
 
     // Fourth: totalCompleted = 3
     // avg = 2500 + (1000 - 2500) / 3 = 2000
-    setMetric("totalCompleted", 3);
-    updateAvgDuration(1000);
-    assert.strictEqual(getMetric("avgDurationMs"), 2000);
+    await setMetric("totalCompleted", 3);
+    await updateAvgDuration(1000);
+    assert.strictEqual(await getMetric("avgDurationMs"), 2000);
   });
 
-  void it("upsertSession and getSession round-trip a session", () => {
+  void it("upsertSession and getSession round-trip a session", async () => {
     const session = {
       id: "test-1",
       title: "Test Session",
@@ -118,8 +118,8 @@ void describe("metrics module", () => {
       completedAt: null,
       durationMs: null,
     };
-    upsertSession(session);
-    const retrieved = getSession("test-1");
+    await upsertSession(session);
+    const retrieved = await getSession("test-1");
     assert.notStrictEqual(retrieved, null);
     assert.strictEqual(retrieved!.id, session.id);
     assert.strictEqual(retrieved!.title, session.title);
@@ -131,8 +131,8 @@ void describe("metrics module", () => {
     assert.strictEqual(retrieved!.durationMs, session.durationMs);
   });
 
-  void it("upsertSession overwrites existing session", () => {
-    upsertSession({
+  void it("upsertSession overwrites existing session", async () => {
+    await upsertSession({
       id: "test-1",
       title: "Original",
       directory: "/tmp",
@@ -142,7 +142,7 @@ void describe("metrics module", () => {
       completedAt: null,
       durationMs: null,
     });
-    upsertSession({
+    await upsertSession({
       id: "test-1",
       title: "Updated",
       directory: "/tmp",
@@ -152,18 +152,18 @@ void describe("metrics module", () => {
       completedAt: 2000,
       durationMs: 1000,
     });
-    const retrieved = getSession("test-1");
+    const retrieved = await getSession("test-1");
     assert.strictEqual(retrieved!.title, "Updated");
     assert.strictEqual(retrieved!.status, "completed");
     assert.strictEqual(retrieved!.completedAt, 2000);
   });
 
-  void it("getSession returns null for non-existent session", () => {
-    assert.strictEqual(getSession("nonexistent"), null);
+  void it("getSession returns null for non-existent session", async () => {
+    assert.strictEqual(await getSession("nonexistent"), null);
   });
 
-  void it("deleteSession removes a session", () => {
-    upsertSession({
+  void it("deleteSession removes a session", async () => {
+    await upsertSession({
       id: "test-2",
       title: "To Delete",
       directory: "/tmp",
@@ -173,20 +173,20 @@ void describe("metrics module", () => {
       completedAt: null,
       durationMs: null,
     });
-    deleteSession("test-2");
-    assert.strictEqual(getSession("test-2"), null);
+    await deleteSession("test-2");
+    assert.strictEqual(await getSession("test-2"), null);
   });
 
-  void it("getAllSessions returns sessions ordered by startedAt DESC", () => {
+  void it("getAllSessions returns sessions ordered by startedAt DESC", async () => {
     const sessions = [
       { id: "s1", title: "First", directory: "/tmp", agent: "a1", status: "active", startedAt: 1000, completedAt: null, durationMs: null },
       { id: "s2", title: "Second", directory: "/tmp", agent: "a2", status: "completed", startedAt: 2000, completedAt: 3000, durationMs: 1000 },
       { id: "s3", title: "Third", directory: "/tmp", agent: "a3", status: "failed", startedAt: 3000, completedAt: 4000, durationMs: 1000 },
     ];
     for (const s of sessions) {
-      upsertSession(s);
+      await upsertSession(s);
     }
-    const all = getAllSessions();
+    const all = await getAllSessions();
     assert.strictEqual(all.length, 3);
     // Ordered by started_at DESC: s3, s2, s1
     assert.strictEqual(all[0].id, "s3");

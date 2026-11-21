@@ -28,95 +28,110 @@ afterEach(() => {
   }
 })
 
+function cast<T>(value: unknown): T {
+  return value as T
+}
+
 describe("OrchestratorMonitor Plugin", () => {
-  it("exports OrchestratorMonitor as a function", async () => {
+  it("exports default plugin function", async () => {
     const mod = await import("../../.opencode/plugins/orchestrator-monitor.ts")
-    assert.ok(mod.OrchestratorMonitor)
-    assert.strictEqual(typeof mod.OrchestratorMonitor, "function")
+    assert.ok(mod.default)
+    assert.strictEqual(typeof mod.default, "function")
   })
 
   it("returns hooks object with event, tool.execute.before, tool.execute.after", async () => {
-    const { OrchestratorMonitor } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
-    const mockCtx = {
-      project: { id: "test", name: "test" },
-      client: {
-        app: { log: async () => {} },
-        session: { list: async () => ({ data: [] }) },
-      },
-      $: async () => ({}),
+    const { default: plugin } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
+    type Ctx = Parameters<typeof plugin>[0]
+    const ctx = cast<Ctx>({
+      project: { id: "test", worktree: tempDir, time: { created: Date.now() } },
+      client: { app: { log: async () => {} }, session: { list: async () => ({ data: [] }) } },
       directory: tempDir,
       worktree: tempDir,
-    }
-    const hooks = await OrchestratorMonitor(mockCtx as any)
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: cast<Ctx["$"]>(async () => ({ stdout: "", stderr: "", exitCode: 0, success: true })),
+    })
+    const hooks = await plugin(ctx)
     assert.ok(typeof hooks.event === "function", "event hook exists")
     assert.ok(typeof hooks["tool.execute.before"] === "function", "tool.execute.before hook exists")
     assert.ok(typeof hooks["tool.execute.after"] === "function", "tool.execute.after hook exists")
   })
 
   it("event handler does not throw on session.created", async () => {
-    const { OrchestratorMonitor } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
-    const mockCtx = {
-      project: { id: "test", name: "test" },
-      client: {
-        app: { log: async () => {} },
-        session: { list: async () => ({ data: [] }) },
-      },
-      $: async () => ({}),
+    const { default: plugin } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
+    type Ctx = Parameters<typeof plugin>[0]
+    type Hooks = Awaited<ReturnType<typeof plugin>>
+    type EventInput = Parameters<NonNullable<Hooks["event"]>>[0]
+    const ctx = cast<Ctx>({
+      project: { id: "test", worktree: tempDir, time: { created: Date.now() } },
+      client: { app: { log: async () => {} }, session: { list: async () => ({ data: [] }) } },
       directory: tempDir,
       worktree: tempDir,
-    }
-    const hooks = await OrchestratorMonitor(mockCtx as any)
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: cast<Ctx["$"]>(async () => ({ stdout: "", stderr: "", exitCode: 0, success: true })),
+    })
+    const hooks = await plugin(ctx)
 
-    await hooks.event!({
+    const input = cast<EventInput>({
       event: {
         type: "session.created",
         properties: {
           info: {
             id: "test-session-1",
+            projectID: "test",
             title: "Test Session",
             directory: tempDir,
+            version: "1",
             time: { created: Date.now(), updated: Date.now() },
           },
         },
       },
-    } as any)
+    })
+    await hooks.event!(input)
   })
 
   it("tool.execute.before does not throw", async () => {
-    const { OrchestratorMonitor } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
-    const mockCtx = {
-      project: { id: "test", name: "test" },
-      client: {
-        app: { log: async () => {} },
-        session: { list: async () => ({ data: [] }) },
-      },
-      $: async () => ({}),
+    const { default: plugin } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
+    type Ctx = Parameters<typeof plugin>[0]
+    type Hooks = Awaited<ReturnType<typeof plugin>>
+    type ToolInput = Parameters<NonNullable<Hooks["tool.execute.before"]>>[0]
+    type ToolOutput = Parameters<NonNullable<Hooks["tool.execute.before"]>>[1]
+    const ctx = cast<Ctx>({
+      project: { id: "test", worktree: tempDir, time: { created: Date.now() } },
+      client: { app: { log: async () => {} }, session: { list: async () => ({ data: [] }) } },
       directory: tempDir,
       worktree: tempDir,
-    }
-    const hooks = await OrchestratorMonitor(mockCtx as any)
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: cast<Ctx["$"]>(async () => ({ stdout: "", stderr: "", exitCode: 0, success: true })),
+    })
+    const hooks = await plugin(ctx)
 
-    const input = { tool: "read", sessionID: "test-session" }
-    const output = { args: { filePath: "/test.ts" } }
-    await hooks["tool.execute.before"]!(input as any, output as any)
+    const input = cast<ToolInput>({ tool: "read", sessionID: "test-session", callID: "call-1", args: { filePath: "/test.ts" } })
+    const output = cast<ToolOutput>({ args: { filePath: "/test.ts" } })
+    await hooks["tool.execute.before"]!(input, output)
   })
 
   it("tool.execute.after does not throw", async () => {
-    const { OrchestratorMonitor } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
-    const mockCtx = {
-      project: { id: "test", name: "test" },
-      client: {
-        app: { log: async () => {} },
-        session: { list: async () => ({ data: [] }) },
-      },
-      $: async () => ({}),
+    const { default: plugin } = await import("../../.opencode/plugins/orchestrator-monitor.ts")
+    type Ctx = Parameters<typeof plugin>[0]
+    type Hooks = Awaited<ReturnType<typeof plugin>>
+    type ToolInput = Parameters<NonNullable<Hooks["tool.execute.after"]>>[0]
+    type ToolOutput = Parameters<NonNullable<Hooks["tool.execute.after"]>>[1]
+    const ctx = cast<Ctx>({
+      project: { id: "test", worktree: tempDir, time: { created: Date.now() } },
+      client: { app: { log: async () => {} }, session: { list: async () => ({ data: [] }) } },
       directory: tempDir,
       worktree: tempDir,
-    }
-    const hooks = await OrchestratorMonitor(mockCtx as any)
+      experimental_workspace: { register: () => {} },
+      serverUrl: new URL("http://localhost:4096"),
+      $: cast<Ctx["$"]>(async () => ({ stdout: "", stderr: "", exitCode: 0, success: true })),
+    })
+    const hooks = await plugin(ctx)
 
-    const input = { tool: "read", sessionID: "test-session" }
-    const output = { args: { filePath: "/test.ts" } }
-    await hooks["tool.execute.after"]!(input as any, output as any)
+    const input = cast<ToolInput>({ tool: "read", sessionID: "test-session", callID: "call-1", args: { filePath: "/test.ts" } })
+    const output = cast<ToolOutput>({ args: { filePath: "/test.ts" } })
+    await hooks["tool.execute.after"]!(input, output)
   })
 })

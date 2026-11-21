@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_sc_imports_basename ON sc_imports(imported_basena
 CREATE TABLE IF NOT EXISTS sc_call_graph (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   caller_file_id INTEGER NOT NULL REFERENCES sc_files(id) ON DELETE CASCADE,
-  caller_symbol TEXT NOT NULL,
+  caller_symbol TEXT,
   callee_file_id INTEGER REFERENCES sc_files(id) ON DELETE CASCADE,
   callee_symbol TEXT NOT NULL,
   confidence REAL DEFAULT 1.0,

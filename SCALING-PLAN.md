@@ -1,8 +1,6 @@
 # План масштабирования оркестратора
 
-> **Связанные планы:** [CONTEXT-OVERFLOW-PLAN.md](./CONTEXT-OVERFLOW-PLAN.md) — Phase 1 (Checkpoints) + Phase 2 (Sub-orchestrators)
-
-Статус: **реализовано** (03.07.2026) — high-приоритетные модули. RAG, Budget, Monitor отложены.
+> Статус: **реализовано** (03.07.2026) — high-приоритетные модули. RAG, Budget, Telegram/Web Monitor отложены. Checkpoints и Sub-orchestrators реализованы в `src/orchestrator.ts` и `src/kb/checkpoint.ts`.
 
 Цель: перейти от простых пайплайнов (3-5 агентов) к сложным задачам на десятки агентов
 с отказоустойчивостью, контрольом бюджета, накопленным контекстом и real-time мониторингом.
@@ -179,56 +177,70 @@ FROM task_nodes GROUP BY agent;
 
 ### Схема БД (дополнение к SQLite State)
 
+Актуальная схема в `src/kb/schema.ts`:
+
 ```sql
--- Документы (для FTS5)
-CREATE VIRTUAL TABLE kb_documents USING fts5(
-  path UNINDEXED,
-  title,
+-- Проиндексированные файлы
+CREATE TABLE IF NOT EXISTS kb_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  title TEXT,
+  category TEXT,
+  content_hash TEXT,
+  created_at INTEGER DEFAULT (unixepoch()),
+  updated_at INTEGER DEFAULT (unixepoch())
+);
+
+-- Семантические чанки
+CREATE TABLE IF NOT EXISTS kb_chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  doc_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  heading TEXT,
+  level INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  token_count INTEGER NOT NULL,
+  created_at INTEGER DEFAULT (unixepoch()),
+  updated_at INTEGER DEFAULT (unixepoch())
+);
+
+-- FTS5 keyword-индекс (отдельная виртуальная таблица + триггеры)
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
   content,
-  category UNINDEXED,
-  updated_at UNINDEXED,
+  heading,
+  content='kb_chunks',
+  content_rowid='id',
   tokenize='porter unicode61'
 );
 
--- Чанки (метаданные)
-CREATE TABLE kb_chunks (
+-- Эмбеддинги (для RAG, опционально)
+CREATE TABLE IF NOT EXISTS kb_embeddings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  path TEXT NOT NULL,
-  title TEXT NOT NULL,
-  content TEXT NOT NULL,
-  token_count INTEGER NOT NULL,
-  level INTEGER NOT NULL,        -- глубина заголовка (1=H1, 2=H2...)
-  sort_order INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  chunk_id INTEGER NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  created_at INTEGER DEFAULT (unixepoch())
 );
 
--- Эмбеддинги (для RAG)
-CREATE TABLE kb_embeddings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chunk_id INTEGER REFERENCES kb_chunks(id) ON DELETE CASCADE,
-  model TEXT NOT NULL DEFAULT 'gemini-embedding-2',
-  dimension INTEGER NOT NULL DEFAULT 3072,
-  embedding BLOB NOT NULL,       -- Float32Array
-  created_at INTEGER NOT NULL
-);
-
--- Memory Tree (иерархические саммари)
-CREATE TABLE kb_memory_tree (
+-- Memory Tree (иерархические саммари + чекпоинты)
+CREATE TABLE IF NOT EXISTS kb_memory_tree (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL,
-  level TEXT NOT NULL,           -- 'file' | 'section' | 'project'
-  summary TEXT NOT NULL,         -- саммари (≤500 токенов)
-  token_count INTEGER NOT NULL,
+  level TEXT NOT NULL CHECK(level IN ('file', 'section', 'project', 'checkpoint')),
+  summary TEXT NOT NULL,
+  token_count INTEGER NOT NULL DEFAULT 0,
   parent_id INTEGER REFERENCES kb_memory_tree(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at INTEGER DEFAULT (unixepoch()),
+  updated_at INTEGER DEFAULT (unixepoch()),
+  UNIQUE(path, level)
 );
 
 -- Индексы
-CREATE INDEX idx_chunks_path ON kb_chunks(path);
-CREATE INDEX idx_embeddings_chunk ON kb_embeddings(chunk_id);
-CREATE INDEX idx_memory_parent ON kb_memory_tree(parent_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON kb_chunks(doc_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_chunk_id ON kb_embeddings(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_memory_tree_level ON kb_memory_tree(level);
+CREATE INDEX IF NOT EXISTS idx_memory_parent ON kb_memory_tree(parent_id);
 ```
 
 ### Chunking (семантический, по Markdown заголовкам)
@@ -387,7 +399,7 @@ const summary = await runWorker({
 
 ### Sub-Orchestrators (Phase 2 контекст-оверфлоу)
 
-> **Детальная спецификация:** [CONTEXT-OVERFLOW-PLAN.md](./CONTEXT-OVERFLOW-PLAN.md) — Phase 2
+> **Примечание:** Sub-orchestrators реализованы через `[SUBORCH]` signal от conductor и CLI `--sub-orch`.
 
 Sub-orchestrator'ы решают две проблемы:
 1. **Контекстный бюджет** — каждая подзадача в своей сессии, контекст не смешивается

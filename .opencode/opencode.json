@@ -1,6 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "opencode-go/deepseek-v4-flash",
+  "plugin": ["./plugins/orchestrator-monitor.ts"],
   "agent": {
     "orchestrator-conductor": {
       "model": "opencode-go/deepseek-v4-flash",

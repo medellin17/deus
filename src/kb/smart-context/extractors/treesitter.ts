@@ -1,38 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import type { Parser as ParserType, Language as LanguageType, Tree, Node, Point } from 'web-tree-sitter';
 import type { Extraction, Extractor } from './common.ts';
 import type { Lang, SymbolType } from '../types.ts';
 import { RegexExtractor } from './regex.ts';
 
-// Inline minimal types for web-tree-sitter (optional dependency)
-// Instead of a static `import type ParserType from 'web-tree-sitter'`
-interface TreeSitterLanguage {
-  load?(path: string): Promise<unknown>;
-}
-interface TreeSitterSyntaxNode {
-  type: string;
-  text: string;
-  childCount: number;
-  startPosition: { row: number; column: number };
-  childForFieldName(name: string): TreeSitterSyntaxNode | null;
-  child(index: number): TreeSitterSyntaxNode | null;
-  children?: TreeSitterSyntaxNode[];
-}
-interface TreeSitterParserInstance {
-  setLanguage(lang: unknown): void;
-  parse(content: string): TreeSitterTree;
-}
-interface TreeSitterTree {
-  rootNode: TreeSitterSyntaxNode;
-  delete(): void;
-}
-interface TreeSitterModule {
-  default?: { new(): TreeSitterParserInstance; init(): Promise<void>; Language: TreeSitterLanguage };
-  init?(): Promise<void>;
-  Language?: TreeSitterLanguage;
-}
-
-let Parser: { new(): TreeSitterParserInstance; init(): Promise<void>; Language: TreeSitterLanguage } | null = null;
+let Parser: typeof ParserType | null = null;
+let Language: typeof LanguageType | null = null;
 
 const GRAMMAR_FILES: Record<Lang, string | null> = {
   typescript: 'tree-sitter-typescript.wasm',
@@ -54,10 +28,10 @@ function getGrammarPath(name: string): string {
 export async function initTreeSitter(): Promise<void> {
   if (Parser) return;
   try {
-    const mod = await import('web-tree-sitter') as TreeSitterModule;
-    const ctor = mod.default ?? mod;
-    Parser = ctor as unknown as { new(): TreeSitterParserInstance; init(): Promise<void>; Language: TreeSitterLanguage };
-    if (Parser.init) {
+    const mod = await import('web-tree-sitter');
+    Parser = mod.Parser;
+    Language = mod.Language;
+    if (typeof Parser.init === 'function') {
       await Parser.init();
     }
   } catch {
@@ -68,8 +42,8 @@ export async function initTreeSitter(): Promise<void> {
 export class TreeSitterExtractor implements Extractor {
   lang: Lang;
   private fallback: RegexExtractor;
-  private parser: TreeSitterParserInstance | null = null;
-  private language: unknown = null;
+  private parser: ParserType | null = null;
+  private language: LanguageType | null = null;
 
   constructor(lang: Lang) {
     this.lang = lang;
@@ -81,11 +55,10 @@ export class TreeSitterExtractor implements Extractor {
     if (!grammarName) return false;
     try {
       await initTreeSitter();
-      if (!Parser) return false;
+      if (!Parser || !Language) return false;
       const wasmPath = getGrammarPath(grammarName);
       if (!fs.existsSync(wasmPath)) return false;
-      const lang = await Parser!.Language!.load!(wasmPath);
-      this.language = lang;
+      this.language = await Language.load(wasmPath);
       this.parser = new Parser();
       this.parser.setLanguage(this.language);
       return true;
@@ -98,15 +71,18 @@ export class TreeSitterExtractor implements Extractor {
     if (!this.parser || !this.language) {
       return this.fallback.extract(content);
     }
-    let tree: TreeSitterTree | null = null;
+    let tree: Tree | null = null;
     try {
       tree = this.parser.parse(content);
+      if (!tree) {
+        return this.fallback.extract(content);
+      }
       const root = tree.rootNode;
       const symbols: Extraction['symbols'] = [];
       const imports: Extraction['imports'] = [];
       const calls: Extraction['calls'] = [];
 
-      const walk = (node: TreeSitterSyntaxNode) => {
+      const walk = (node: Node) => {
         const type = node.type;
         // Functions
         if (

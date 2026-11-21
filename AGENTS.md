@@ -4,7 +4,7 @@
 
 ## Обзор
 
-Multi-agent оркестратор на базе OpenCode SDK. Управляет 18 агентами (17 + суб-оркестратор) через HTTP API, имеет встроенную Knowledge Base (SQLite + FTS5) для контекста между сессиями.
+Multi-agent оркестратор на базе OpenCode SDK. Управляет 18 агентами (17 + sub-orchestrator) через HTTP API, имеет встроенную Knowledge Base (SQLite + FTS5), State DB для задач/чекпоинтов, DAG-движок и плагин мониторинга.
 
 **Стек:** TypeScript, @opencode-ai/sdk, better-sqlite3, Node.js 20+, tsx
 
@@ -12,10 +12,10 @@ Multi-agent оркестратор на базе OpenCode SDK. Управляе�
 
 | Агент | Модель | Thinking |
 |-------|--------|----------|
-| orchestrator-conductor | `opencode-go/deepseek-v4-pro` | `reasoningEffort: "max"` |
+| orchestrator-conductor | `opencode-go/deepseek-v4-flash` | `reasoningEffort: "max"` |
 | architect-planner-pro | `opencode-go/deepseek-v4-pro` | `reasoningEffort: "max"` |
 | reviewer-critic-pro | `opencode-go/deepseek-v4-pro` | `reasoningEffort: "max"` |
-| Остальные 14 агентов | `opencode-go/deepseek-v4-flash` | `reasoningEffort: "max"` |
+| Остальные 15 агентов | `opencode-go/deepseek-v4-flash` | `reasoningEffort: "max"` |
 
 ## Структура
 
@@ -30,10 +30,18 @@ agentic-orchestrator-v2/
 │   │   └── orchestrator-monitor.ts # Плагин мониторинга
 │   └── skills/                # 32 skill'а
 ├── src/
-│   ├── orchestrator.ts        # Основной скрипт
+│   ├── orchestrator.ts        # Основной скрипт (CLI + SDK)
 │   ├── types.ts               # Типы SubOrchestratorReport и др.
 │   ├── metrics.ts             # Метрики из плагина
 │   ├── opencode-client.ts     # Адаптер SDK
+│   ├── dag/                   # DAG-движок
+│   │   ├── engine.ts          # Топологическая сортировка, retries, fallback
+│   │   ├── types.ts           # TaskGraph, TaskNodeDefinition
+│   │   └── index.ts           # Public API
+│   ├── state/                 # State DB
+│   │   ├── schema.ts          # tasks, task_nodes, session_log, agent_stats
+│   │   ├── task-manager.ts    # CRUD задач и нод
+│   │   └── index.ts
 │   └── kb/                    # Knowledge Base
 │       ├── schema.ts          # SQLite: documents, chunks, FTS5, embeddings, memory_tree
 │       ├── chunker.ts         # Семантический чанкинг по Markdown заголовкам
@@ -43,7 +51,7 @@ agentic-orchestrator-v2/
 │       ├── search.ts          # Гибридный поиск (FTS5 + memory tree)
 │       ├── super-context.ts   # Авто-инжект контекста
 │       ├── indexer.ts         # Индексация файлов
-│       ├── checkpoint.ts      # CheckpointManager
+│       ├── checkpoint.ts      # CheckpointManager (чекпоинты в SQLite)
 │       ├── index.ts           # Public API
 │       └── smart-context/     # SmartContextEngine (built-in)
 ├── package.json
@@ -53,7 +61,7 @@ agentic-orchestrator-v2/
 ## Запуск
 
 ```bash
-# Оркестрация (LLM-конductor сам выбирает пайплайн)
+# Оркестрация (LLM-conductor сам выбирает пайплайн)
 npx tsx src/orchestrator.ts --cwd ../target-project "задача"
 
 # Статический пайплайн
@@ -62,28 +70,47 @@ npx tsx src/orchestrator.ts --cwd ../target-project --pipeline build "задач
 # Один агент
 npx tsx src/orchestrator.ts --cwd ../target-project --agent researcher-explorer "задача"
 
+# Параллельные задачи
+npx tsx src/orchestrator.ts --cwd ../target-project --parallel "задача1" "задача2"
+
+# DAG из JSON
+npx tsx src/orchestrator.ts --cwd ../target-project --dag graph.json
+
+# Sub-orchestrators из JSON
+npx tsx src/orchestrator.ts --cwd ../target-project --sub-orch domains.json
+
+# Resume последнего чекпоинта
+npx tsx src/orchestrator.ts --cwd ../target-project --resume
+
 # Индексация проекта в KB
 npx tsx src/orchestrator.ts --index ../target-project
 
 # Статистика KB
 npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
+
+# Метрики оркестратора
+npx tsx src/orchestrator.ts --cwd ../target-project --metrics
 ```
 
 ## Автоматика
 
 При запуске с `--cwd`:
 1. Копирует `.opencode/` в целевой проект (если нет)
-2. Запускает `opencode serve` в целевой директории
-3. Если KB пуста — индексирует проект
-4. Инжектит контекст из KB перед планированием
-5. После завершения — сохраняет результат в memory tree
+2. Создаёт `.deus/` (kb, runs, .gitignore)
+3. Запускает `opencode serve` в целевой директории
+4. Если KB пуста — индексирует проект
+5. При наличии `GEMINI_API_KEY` — генерирует эмбеддинги
+6. Инжектит контекст из KB перед планированием
+7. При переполнении контекста (>140k токенов) — автоматически сохраняет чекпоинт и делает до 5 попыток resume
+8. После завершения — сохраняет результат в memory tree
 
-## Агенты (17)
+## Агенты (18)
 
 ### Оркестрация
 - `orchestrator-conductor` — главный дирижёр, декомпозирует, dispatch-ит, синтезирует (не проверяет сам — делегирует reviewer'ам)
 - `architect-planner` — базовый архитектор
 - `architect-planner-pro` — продвинутый архитектор (deepseek-v4-pro)
+- `sub-orchestrator` — доменный дирижёр; выполняет sub-task от conductor и возвращает структурированный JSON-отчёт
 
 ### Разработка
 - `implementer-builder` — пишет код
@@ -117,13 +144,24 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 | `audit` | security → code-reviewer → reviewer |
 | `debug` | researcher → debug → implementer → qa |
 | `docs` | researcher → content-writer → reviewer |
+| `parallel-audit` | security ∥ code-reviewer ∥ reviewer |
+| `parallel-research` | 3× researcher-explorer |
+| `parallel-review` | security ∥ code-reviewer ∥ reviewer (на одном контексте) |
+| `content` | researcher → content-writer → reviewer |
+| `data` | researcher → data-analyst → reviewer |
+| `design` | researcher → ux-designer → reviewer → implementer |
+| `plan` | researcher → architect |
+| `research` | researcher |
+
+Параллельные шаги внутри одного `parallelGroup` выполняются одновременно; их результаты объединяются и передаются дальше как `{prev}`.
 
 ## Knowledge Base
 
-- **FTS5** — keyword поиск по BM25 (zero dependencies)
-- **Memory Tree** — иерархические саммари (file/module/project)
+- **FTS5** — keyword поиск по BM25 (встроен в SQLite)
+- **Memory Tree** — иерархические саммари (file/section/project/checkpoint)
 - **SuperContext** — авто-инжект контекста перед планированием
 - **Embeddings** — Gemini `gemini-embedding-2` (3072 dim, требует `GEMINI_API_KEY`)
+- **Smart Context Engine** — встроенный поиск кода (BM25 + symbol graph + import graph); Tree-sitter-парсинг опционален
 
 ### Таблицы SQLite
 
@@ -139,13 +177,14 @@ npx tsx src/orchestrator.ts --kb-stats --cwd ../target-project
 
 ### search-code
 
-Встроенный инструмент умного поиска кода на базе SmartContextEngine (BM25 + symbol graph + import graph). Реализован внутри проекта, не требует внешних зависимостей.
+Встроенный инструмент умного поиска кода на базе `SmartContextEngine` (BM25 + symbol graph + import graph). Реализован внутри проекта в `src/kb/smart-context/`.
 
 - **BM25** — keyword поиск с синонимами
 - **Symbol Graph** — парсинг функций/классов/типов + call_graph
 - **Import Graph** — 1-2 hops по графу импортов
 - **Category Weights** — per-category веса для bugfix/feature/refactor
 - **Skeletonization** — сжатие файлов >400 строк до структуры
+- **Tree-sitter (опционально)** — более точный парсинг при наличии `web-tree-sitter` и WASM-грамматик в `grammars/`
 
 **Использование:**
 ```
@@ -153,7 +192,7 @@ search_code(query="user authentication", project="/path/to/project")
 ```
 
 **Индексация:**
-Индексация происходит автоматически при запуске с флагом `--index` или при вызове `indexDirectory()`. Поиск встроен в KB и не требует внешних зависимостей.
+Происходит автоматически при запуске с флагом `--index`, при `--cwd`-запуске (если KB пуста) или при вызове `indexDirectory()`. Поиск встроен в KB.
 
 ## Добавление агента
 
@@ -161,9 +200,17 @@ search_code(query="user authentication", project="/path/to/project")
 2. Добавить в `VALID_AGENTS` в `src/orchestrator.ts`
 3. Добавить в `.opencode/opencode.json` (если нужна своя модель)
 
+## State, чекпоинты и мониторинг
+
+- **State DB** — `tasks`, `task_nodes`, `session_log`, `agent_stats` в той же SQLite (`orchestrator.db`). Используется DAG-движком и CheckpointManager.
+- **CheckpointManager** — сохраняет состояние при переполнении контекста (>140k токенов) и восстанавливает через `--resume`.
+- **Monitor plugin** — отслеживает lifecycle сессий и пишет метрики в `metrics.db` (`totalCreated`, `totalCompleted`, `totalFailed`, `activeSessions`, `avgDurationMs`).
+
 ## Ограничения
 
-- Сервер: `opencode serve` должен быть запущен (auto-spawn)
+- Сервер: `opencode serve` должен быть запущен (auto-spawn на `localhost:4096`)
 - `.opencode/` копируется автоматически при `--cwd`
 - Результаты прогонов: `.deus/runs/run-{ts}/` — отчёты в `.md`
 - БД: `.deus/kb/orchestrator.db` — per-project, не коммитить в git (`.deus/.gitignore` создаётся автоматически)
+- Auto-resume: до 5 попыток продолжения после checkpoint
+- Sub-orchestrators: до 3 параллельных независимых доменов (настраивается `--max-depth`)

@@ -4,21 +4,27 @@
   "description": "SDK-based multi-agent orchestrator for OpenCode",
   "type": "module",
   "scripts": {
-    "orchestrator": "tsx src/orchestrator.ts",
-    "demo": "tsx src/orchestrator.ts --demo",
+    "orchestrator": "node --import tsx src/orchestrator.ts",
+    "demo": "node --import tsx src/orchestrator.ts --demo",
+    "v2": "node --import tsx src/v2/cli.ts",
+    "v2:smoke": "node --import tsx src/v2/cli.ts --smoke",
     "server": "opencode serve --port 4096",
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "test": "node --import tsx --test src/__tests__/**/*.test.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@opencode-ai/sdk": "^1.17.13",
-    "better-sqlite3": "^12.11.1"
+    "@opencode/client": "2.3.2",
+    "better-sqlite3": "^12.11.1",
+    "js-yaml": "^5.2.1",
+    "web-tree-sitter": "^0.26.10"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.13",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.1.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"

@@ -32,6 +32,15 @@ import type { SubOrchestratorReport, SubOrchestratorConfig, DomainTask } from ".
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+  process.exit(1);
+});
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface TaskStep {
@@ -96,11 +105,11 @@ const MAX_AUTO_RESUME = 5;
 
 // ─── Path Validation ─────────────────────────────────────────────────────────
 
-function isValidTargetPath(targetPath: string): boolean {
+function isValidTargetPath(targetPath: string, basePath: string = process.cwd()): boolean {
   try {
     const resolved = path.resolve(targetPath);
-    const cwd = process.cwd();
-    return resolved === cwd || resolved.startsWith(cwd + path.sep);
+    const base = path.resolve(basePath);
+    return resolved === base || resolved.startsWith(base + path.sep);
   } catch {
     return false;
   }
@@ -286,6 +295,34 @@ async function checkServerRunning(baseUrl: string): Promise<boolean> {
   }
 }
 
+function resolveOpenCodeExe(): string {
+  if (process.env.OPENCODE_EXE && fs.existsSync(process.env.OPENCODE_EXE)) {
+    return process.env.OPENCODE_EXE;
+  }
+
+  const pathVar = process.env.PATH || process.env.Path || "";
+  const dirs = pathVar.split(path.delimiter).filter(Boolean);
+
+  if (process.platform === "win32") {
+    for (const dir of dirs) {
+      const candidates = [
+        path.join(dir, "opencode-ai", "bin", "opencode.exe"),
+        path.join(dir, "node_modules", "opencode-ai", "bin", "opencode.exe"),
+      ];
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+  } else {
+    for (const dir of dirs) {
+      const candidate = path.join(dir, "opencode");
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+
+  return "opencode";
+}
+
 async function ensureServerRunning(baseUrl: string, cwd?: string): Promise<void> {
   if (await checkServerRunning(baseUrl)) {
     log("INFO", "Сервер уже запущен, подключение...");
@@ -294,26 +331,13 @@ async function ensureServerRunning(baseUrl: string, cwd?: string): Promise<void>
   }
 
   const serverCwd = cwd || DEFAULT_CWD;
-  log("INFO", `Запуск opencode serve в ${serverCwd}...`);
-  serverProcess = spawn("opencode", ["serve", "--port", "4096"], {
-    stdio: "pipe",
+  const opencodeExe = resolveOpenCodeExe();
+  log("INFO", `Запуск opencode serve (${opencodeExe}) в ${serverCwd}...`);
+  serverProcess = spawn(opencodeExe, ["serve", "--port", "4096", "--print-logs"], {
+    stdio: ["ignore", "ignore", "ignore"],
     detached: false,
     cwd: serverCwd,
-    shell: process.platform === "win32",
-  });
-
-  serverProcess.stdout?.on("data", (data: Buffer) => {
-    const lines = data.toString().trim().split("\n");
-    for (const line of lines) {
-      log("DEBUG", `[server] ${line}`);
-    }
-  });
-
-  serverProcess.stderr?.on("data", (data: Buffer) => {
-    const lines = data.toString().trim().split("\n");
-    for (const line of lines) {
-      log("DEBUG", `[server] ${line}`);
-    }
+    shell: false,
   });
 
   serverProcess.on("error", (err: Error) => {
@@ -330,7 +354,9 @@ async function ensureServerRunning(baseUrl: string, cwd?: string): Promise<void>
   log("INFO", "Ожидание готовности сервера...");
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 500));
-    if (await checkServerRunning(baseUrl)) {
+    const running = await checkServerRunning(baseUrl);
+    if (i % 4 === 0) log("INFO", `  health check #${i + 1}: ${running ? "ok" : "pending"}`);
+    if (running) {
       log("INFO", "Сервер готов");
       return;
     }
@@ -1779,9 +1805,9 @@ async function main(): Promise<void> {
   globalUseRag = useRag;
   globalSubOrchMaxParallel = maxDepth ?? 3;
 
-  // Validate --cwd path (prevent path traversal)
-  if (cwd && !isValidTargetPath(cwd)) {
-    console.error("Error: --cwd path must be within the current working directory");
+  // Validate --cwd path
+  if (cwd && !path.isAbsolute(path.resolve(cwd))) {
+    console.error("Error: --cwd path must be absolute");
     process.exit(1);
   }
 
@@ -1828,7 +1854,13 @@ async function main(): Promise<void> {
         pendingDispatches: [],
         mode: mode as "orchestrate" | "pipeline" | "direct",
       };
-      const { result } = await executeMode(mode, currentTask, pipeline, agent, skipKbContext, dispatchState);
+      let result: StepResult | PipelineResult;
+      try {
+        result = (await executeMode(mode, currentTask, pipeline, agent, skipKbContext, dispatchState)).result;
+      } catch (err: unknown) {
+        log("ERROR", `executeMode failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+        return shutdownAndExit(1);
+      }
 
       // Determine if suspended
       let isSuspended = false;
@@ -2061,16 +2093,16 @@ async function main(): Promise<void> {
           process.chdir(globalCwd);
         }
         const { getMetrics, getAllSessions, closeMetrics } = await import("./metrics.js");
-        const m = getMetrics();
-        const sessions = getAllSessions();
+        const m = await getMetrics();
+        const sessions = await getAllSessions();
         console.log(JSON.stringify({ metrics: m, sessions }, null, 2));
-        closeMetrics();
+        await closeMetrics();
         return shutdownAndExit(0);
       }
       case "index": {
-        const indexPath = tasks[0] || process.cwd();
-        if (!isValidTargetPath(indexPath)) {
-          console.error("Error: --index path must be within the current working directory");
+        const indexPath = tasks[0] || globalCwd;
+        if (!isValidTargetPath(indexPath, globalCwd)) {
+          console.error("Error: --index path must be within --cwd");
           process.exit(1);
         }
         const target = path.resolve(indexPath);

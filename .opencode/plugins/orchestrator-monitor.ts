@@ -7,11 +7,11 @@ import {
   upsertSession,
   getSession,
   deleteSession,
-} from "../../src/metrics.ts"
+} from "../lib/metrics-db.ts"
 
 const SERVICE = "orchestrator-monitor"
 
-export const OrchestratorMonitor: Plugin = async (ctx) => {
+const orchestratorMonitorPlugin: Plugin = async (ctx) => {
   const client = ctx.client
 
   return {
@@ -19,9 +19,9 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
       switch (event.type) {
         case "session.created": {
           const { info } = event.properties
-          incrementMetric("totalCreated", 1)
-          incrementMetric("activeSessions", 1)
-          upsertSession({
+          await incrementMetric("totalCreated", 1)
+          await incrementMetric("activeSessions", 1)
+          await upsertSession({
             id: info.id,
             title: info.title,
             directory: info.directory,
@@ -43,9 +43,9 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
 
         case "session.updated": {
           const { info } = event.properties
-          const existing = getSession(info.id)
+          const existing = await getSession(info.id)
           if (existing) {
-            upsertSession({
+            await upsertSession({
               ...existing,
               title: info.title,
               directory: info.directory,
@@ -64,14 +64,14 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
         case "session.status": {
           const { sessionID, status } = event.properties
           if (status.type === "idle") {
-            const existing = getSession(sessionID)
+            const existing = await getSession(sessionID)
             if (existing && existing.status === "active") {
               const now = Date.now()
               const durationMs = now - existing.startedAt
-              incrementMetric("totalCompleted", 1)
-              incrementMetric("activeSessions", -1)
-              updateAvgDuration(durationMs)
-              upsertSession({
+              await incrementMetric("totalCompleted", 1)
+              await incrementMetric("activeSessions", -1)
+              await updateAvgDuration(durationMs)
+              await upsertSession({
                 ...existing,
                 status: "completed",
                 completedAt: now,
@@ -107,12 +107,12 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
 
         case "session.error": {
           const { sessionID } = event.properties
-          incrementMetric("totalFailed", 1)
+          await incrementMetric("totalFailed", 1)
           if (sessionID) {
-            incrementMetric("activeSessions", -1)
-            const existing = getSession(sessionID)
+            await incrementMetric("activeSessions", -1)
+            const existing = await getSession(sessionID)
             if (existing) {
-              upsertSession({
+              await upsertSession({
                 ...existing,
                 status: "failed",
                 completedAt: Date.now(),
@@ -131,12 +131,12 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
 
         case "session.deleted": {
           const { info } = event.properties
-          const existing = getSession(info.id)
+          const existing = await getSession(info.id)
           if (existing) {
             if (existing.status === "active") {
-              incrementMetric("activeSessions", -1)
+              await incrementMetric("activeSessions", -1)
             }
-            deleteSession(info.id)
+            await deleteSession(info.id)
           }
           void client.app.log({
             body: {
@@ -207,3 +207,5 @@ export const OrchestratorMonitor: Plugin = async (ctx) => {
     },
   }
 }
+
+export default orchestratorMonitorPlugin

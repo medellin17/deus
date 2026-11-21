@@ -13,16 +13,16 @@ import {
 let tempDir: string;
 let originalCwd: string;
 
-beforeEach(() => {
-  closeMetrics();
+beforeEach(async () => {
+  await closeMetrics();
   originalCwd = process.cwd();
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "debug-"));
   process.chdir(tempDir);
   console.log("beforeEach CWD:", process.cwd());
 });
 
-afterEach(() => {
-  closeMetrics();
+afterEach(async () => {
+  await closeMetrics();
   process.chdir(originalCwd);
   try {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -30,26 +30,26 @@ afterEach(() => {
 });
 
 void describe("debug metrics isolation", () => {
-  void it("first test", () => {
+  void it("first test", async () => {
     console.log("test1 CWD:", process.cwd());
-    incrementMetric("totalCreated", 1);
-    const v = getMetric("totalCreated");
+    await incrementMetric("totalCreated", 1);
+    const v = await getMetric("totalCreated");
     console.log("test1 totalCreated:", v);
     assert.strictEqual(v, 1);
   });
 
-  void it("second test", () => {
+  void it("second test", async () => {
     console.log("test2 CWD:", process.cwd());
-    incrementMetric("totalCreated", 1);
-    const v = getMetric("totalCreated");
+    await incrementMetric("totalCreated", 1);
+    const v = await getMetric("totalCreated");
     console.log("test2 totalCreated:", v);
     assert.strictEqual(v, 1);
   });
 
-  void it("third test", () => {
+  void it("third test", async () => {
     console.log("test3 CWD:", process.cwd());
-    incrementMetric("totalCreated", 1);
-    const v = getMetric("totalCreated");
+    await incrementMetric("totalCreated", 1);
+    const v = await getMetric("totalCreated");
     console.log("test3 totalCreated:", v);
     assert.strictEqual(v, 1);
   });

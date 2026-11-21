@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ensureSmartContextSchema } from './smart-context/db.ts';
 
 export interface Document {
@@ -49,6 +51,7 @@ export class KBDatabase {
 
   constructor(dbPath: string = '.deus/kb/orchestrator.db') {
     this.dbPath = dbPath;
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');

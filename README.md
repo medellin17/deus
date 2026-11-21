@@ -2,9 +2,25 @@
 
 Multi-agent orchestrator for OpenCode with Knowledge Base, DAG engine, and auto-scaling.
 
-17 specialized agents. SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines).
+18 specialized agents (17 + sub-orchestrator). SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines + DAG).
 
-## Quick Start
+> **OpenCode 2.x:** use the V2-native deterministic runner in [`src/v2`](src/v2/README.md).
+> The commands below use the legacy V1 SDK (`@opencode-ai/sdk`) and target OpenCode 1.x.
+> They are kept as a reference and are not compatible with the V2 server API.
+
+## V2 runner (recommended for OpenCode 2.x)
+
+```bash
+npm install
+npm run v2:smoke
+npm run v2 -- --cwd /path/to/project --pipeline build "your task"
+```
+
+It runs deterministic pipelines (`build`, `fix`, `audit`), uses the shared OpenCode V2 service,
+answers permission requests by policy, checkpoints every step, and runs in a git worktree by default.
+See [`src/v2/README.md`](src/v2/README.md) for details, resume, and safety rules.
+
+## Legacy V1 quick start
 
 ```bash
 git clone https://github.com/medellin17/deus.git
@@ -24,14 +40,21 @@ On first run, Deus automatically:
 | Command | What it does |
 |---------|-------------|
 | `npx tsx src/orchestrator.ts "task"` | LLM conductor picks pipeline and dispatches agents |
+| `--orchestrate "task"` | Same as above, explicit mode |
 | `--pipeline build "task"` | Static pipeline (researcher → architect → implementer → reviewer → qa) |
 | `--pipeline build-pro "task"` | Pro pipeline (researcher → architect-pro → implementer → reviewer-pro → qa) |
 | `--pipeline full-cycle "task"` | Full high-stakes pipeline (researcher → architect-pro → reviewer-pro → implementer → reviewer-pro → qa → doc) |
 | `--agent implementer-builder "task"` | Single agent |
 | `--parallel "task1" "task2"` | Parallel execution |
+| `--dag graph.json` | Execute a DAG graph |
+| `--sub-orch domains.json` | Run parallel sub-orchestrators |
+| `--resume [checkpointId]` | Resume from checkpoint |
 | `--index /path/to/project` | Manual KB indexing |
 | `--kb-stats` | Knowledge Base statistics |
 | `--metrics` | Show orchestrator-monitor plugin metrics |
+| `--no-rag` | Disable Knowledge Base context injection |
+| `--max-depth <n>` | Max parallel sub-orchestrator domains |
+| `--output-dir, -o <name>` | Custom run folder name in `.deus/runs/` |
 
 ## Architecture
 
@@ -40,21 +63,23 @@ orchestrator.ts (CLI + SDK)
     ↓
 opencode serve (HTTP API, port 4096)
     ↓
-┌─────────────────────────────────────────────┐
-│  Conductor (orchestrator-conductor)         │
-│  ├── researcher-explorer (research)         │
-│  ├── architect-planner* (planning)          │
-│  ├── implementer-builder (implementation)   │
-│  ├── reviewer-critic (review, standard)      │
-│  ├── reviewer-critic-pro (review, high-stakes)│
-│  ├── integrator-qa (testing)                │
-│  └── 11 other agents                        │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  18 agents (17 + sub-orchestrator)                          │
+│  ├── orchestrator-conductor (LLM conductor)                 │
+│  ├── researcher-explorer (research)                         │
+│  ├── architect-planner / architect-planner-pro (planning)   │
+│  ├── implementer-builder (implementation)                   │
+│  ├── reviewer-critic / reviewer-critic-pro (review)         │
+│  ├── integrator-qa (testing)                                │
+│  └── 11 other specialized agents                            │
+└─────────────────────────────────────────────────────────────┘
     ↓
-Knowledge Base (SQLite + FTS5)
+Knowledge Base + State (SQLite)
     ├── Auto-indexing
     ├── Context injection before planning
-    └── Memory across sessions
+    ├── Memory Tree across sessions
+    ├── Checkpoints / auto-resume
+    └── DAG / sub-orchestrator state
 ```
 
 ## Project Structure
@@ -65,7 +90,8 @@ Each run creates a timestamped folder in the target project:
 .deus/
 ├── .gitignore              # ignores everything inside
 ├── kb/
-│   └── orchestrator.db     # Knowledge Base (SQLite + FTS5)
+│   ├── orchestrator.db     # Knowledge Base + State DB (SQLite + FTS5)
+│   └── metrics.db          # Monitor plugin metrics
 └── runs/
     └── run-2026-06-29T14-20-00/
         ├── index.md         # summary with links
@@ -79,7 +105,13 @@ Each run creates a timestamped folder in the target project:
 Встроенная Knowledge Base на SQLite + FTS5 с гибридным поиском (BM25 + Memory Tree + опциональные эмбеддинги Gemini).
 Индексация проекта происходит автоматически при первом запуске. Контекст инжектится перед планированием.
 
-Подробнее об агентах, пайплайнах и KB: [AGENTS.md](./AGENTS.md).
+## State, DAG & Checkpoints
+
+- **State DB** — SQLite-таблицы `tasks`, `task_nodes`, `session_log`, `agent_stats` для DAG-исполнения и аналитики.
+- **DAG** — выполняйте произвольные графы зависимых агентов через `--dag graph.json` (`src/dag/engine.ts`).
+- **Checkpoints** — при переполнении контекста (>140k токенов) оркестратор сохраняет состояние и автоматически делает до 5 попыток resume.
+
+Подробнее об агентах, пайплайнах, KB и архитектуре: [AGENTS.md](./AGENTS.md), [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Environment
 
