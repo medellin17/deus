@@ -650,3 +650,59 @@ void describe("runPipeline", () => {
     assert.deepEqual(secondExecutor.calls, ["one", "two"]);
   });
 });
+
+void describe("run state loading", () => {
+  void it("rejects invalid run ids before touching the filesystem", () => {
+    const dir = tempDir();
+
+    for (const runId of ["../../etc", "..", "run-x/../..", "smoke"]) {
+      assert.throws(() => runDirFor(dir, runId), /invalid run id/);
+      assert.throws(() => loadRunState(dir, runId), /invalid run id/);
+    }
+  });
+
+  void it("still resolves and loads a valid run id", () => {
+    const dir = tempDir();
+    const runDir = runDirFor(dir, "run-test");
+    assert.equal(runDir, path.join(dir, ".deus", "runs", "run-test"));
+
+    const now = new Date().toISOString();
+    const state: RunState = {
+      version: 1,
+      runId: "run-test",
+      projectDir: dir,
+      workDir: dir,
+      worktree: false,
+      pipeline: "test",
+      task: "fix the bug",
+      model: "m",
+      status: "succeeded",
+      steps: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, "run.json"), JSON.stringify(state), "utf-8");
+
+    const loaded = loadRunState(dir, "run-test");
+    assert.equal(loaded.runId, "run-test");
+    assert.equal(loaded.status, "succeeded");
+  });
+
+  void it("reports a broken run.json as a clear error, not a SyntaxError", () => {
+    const dir = tempDir();
+    const runDir = runDirFor(dir, "run-test");
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, "run.json"), "{ not json", "utf-8");
+
+    assert.throws(
+      () => loadRunState(dir, "run-test"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /is not valid JSON/);
+        assert.ok(!(err instanceof SyntaxError), `unexpected error: ${err.name}`);
+        return true;
+      },
+    );
+  });
+});

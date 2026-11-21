@@ -62,7 +62,14 @@ export interface PipelineResult {
 
 const MAX_DIFF_CHARS = 30_000;
 
+export function validateRunId(runId: string): void {
+  if (!/^run-[0-9A-Za-z]+$/.test(runId)) {
+    throw new Error(`invalid run id: ${runId} (expected run-<label>)`);
+  }
+}
+
 export function runDirFor(projectDir: string, runId: string): string {
+  validateRunId(runId);
   return path.join(projectDir, ".deus", "runs", runId);
 }
 
@@ -76,7 +83,12 @@ export function loadRunState(projectDir: string, runId: string): RunState {
   if (!fs.existsSync(file)) {
     throw new Error(`checkpoint not found: ${file}`);
   }
-  const state = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
+  let state: RunState;
+  try {
+    state = JSON.parse(fs.readFileSync(file, "utf-8")) as RunState;
+  } catch {
+    throw new Error(`checkpoint ${file} is not valid JSON`);
+  }
   if (state.version !== 1) {
     throw new Error(`unsupported checkpoint version: ${state.version}`);
   }
