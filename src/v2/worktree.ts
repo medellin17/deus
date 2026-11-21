@@ -33,6 +33,12 @@ function isIgnored(cwd: string, relativePath: string): boolean {
  * they pass in the project. Link the project's dependencies when git ignores
  * them, which is the usual case. A non-ignored node_modules is left alone:
  * otherwise apply would commit the link.
+ *
+ * The entries are linked into a real directory instead of replacing
+ * node_modules with a single symlink: git matches the `node_modules/` ignore
+ * pattern only against a directory, so a symlink would be treated as a file,
+ * staged by `git add -A`, and then block the auto-merge ("would overwrite
+ * ignored files").
  */
 function linkNodeModules(
   projectDir: string,
@@ -52,9 +58,17 @@ function linkNodeModules(
   }
 
   try {
-    fs.symlinkSync(source, target, "dir");
+    fs.mkdirSync(target, { recursive: true });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      fs.symlinkSync(
+        path.join(source, entry.name),
+        path.join(target, entry.name),
+        entry.isDirectory() ? "dir" : "file",
+      );
+    }
     onLog?.("linked node_modules into the worktree");
   } catch (error) {
+    fs.rmSync(target, { recursive: true, force: true });
     onLog?.(
       `cannot link node_modules: ${error instanceof Error ? error.message : String(error)}`,
     );

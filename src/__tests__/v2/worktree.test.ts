@@ -54,6 +54,23 @@ void describe("prepareWorkdir", () => {
     assert.equal(fs.readFileSync(path.join(target, "marker"), "utf-8"), "1");
   });
 
+  void it("keeps the linked node_modules out of the git index", () => {
+    const repo = makeRepo(true);
+    const prepared = prepareWorkdir(repo, "run-ignored", true);
+    const target = path.join(prepared.workDir, "node_modules");
+
+    assert.equal(fs.lstatSync(target).isDirectory(), true);
+    assert.doesNotThrow(() => git(prepared.workDir, "check-ignore", "node_modules"));
+
+    git(prepared.workDir, "add", "-A");
+    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], {
+      cwd: prepared.workDir,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    assert.equal(staged, "");
+  });
+
   void it("does not link node_modules when it would be committed", () => {
     const repo = makeRepo(false);
     const prepared = prepareWorkdir(repo, "run-nolink", true);
