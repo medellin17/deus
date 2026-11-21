@@ -36,14 +36,28 @@ function git(cwd: string, args: string[]) {
   });
 }
 
-function gitOk(cwd: string, args: string[]): string {
-  const result = git(cwd, args);
-  if (result.status !== 0) {
-    throw new Error(
-      `git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`,
-    );
-  }
-  return (result.stdout ?? "").trim();
+/** Secret-like paths that must never be committed from a run worktree. */
+function isSecretPath(file: string): boolean {
+  const segments = file.split("/");
+  const base = segments[segments.length - 1] ?? file;
+  const parents = segments.slice(0, -1);
+
+  if (base === ".ssh" || base === ".aws" || base === ".gnupg") return true;
+  if (parents.some((p) => p === ".ssh" || p === ".aws" || p === ".gnupg")) return true;
+  if (base === ".envrc" || base === "id_rsa" || base === "id_ed25519") return true;
+  if (/\.(?:pem|key|p12|pfx)$/i.test(base)) return true;
+  if (base !== ".env.example" && /\.env(?:\.|$)/i.test(base)) return true;
+  return false;
+}
+
+function stagedSecretPaths(workDir: string): string[] {
+  return listFiles(workDir, ["diff", "--cached", "--name-only"]).filter(isSecretPath);
+}
+
+/** Short HEAD hash, or undefined when git cannot read it (non-fatal). */
+function shortHead(cwd: string): string | undefined {
+  const head = git(cwd, ["rev-parse", "--short", "HEAD"]);
+  return head.status === 0 ? head.stdout.trim() : undefined;
 }
 
 function listFiles(cwd: string, args: string[]): string[] {
@@ -352,14 +366,25 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
   worktreeClean = !(worktreeStatus.stdout ?? "").trim();
 
   if (branchExists) {
-    commitHash = gitOk(projectDir, ["rev-parse", "--short", branch]);
+    const head = git(projectDir, ["rev-parse", "--short", branch]);
+    commitHash = head.status === 0 ? head.stdout.trim() : undefined;
   }
 
   if (branchExists) {
     const mergeHead = git(projectDir, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
     if (mergeHead.status === 0) {
       const mergeSource = (mergeHead.stdout ?? "").trim();
-      const branchCommit = gitOk(projectDir, ["rev-parse", branch]);
+      const branchRef = git(projectDir, ["rev-parse", branch]);
+      if (branchRef.status !== 0) {
+        return {
+          status: "skipped",
+          reason: `cannot resolve run branch: ${(branchRef.stderr || branchRef.stdout).trim()}`,
+          branch,
+          commit: commitHash,
+          mergeCommand,
+        };
+      }
+      const branchCommit = branchRef.stdout.trim();
 
       if (mergeSource === branchCommit) {
         const abort = git(projectDir, ["merge", "--abort"]);
@@ -398,7 +423,26 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       }
 
       // Finish the commit that was interrupted on a previous attempt.
-      gitOk(workDir, ["add", "-A"]);
+      const staged = git(workDir, ["add", "-A"]);
+      if (staged.status !== 0) {
+        return {
+          status: "skipped",
+          reason: `git add failed: ${(staged.stderr || staged.stdout).trim()}`,
+          branch,
+          commit: commitHash,
+          mergeCommand,
+        };
+      }
+      const secrets = stagedSecretPaths(workDir);
+      if (secrets.length > 0) {
+        return {
+          status: "skipped",
+          reason: `refusing to commit secret-like files: ${secrets.slice(0, 5).join(", ")}`,
+          branch,
+          commit: commitHash,
+          mergeCommand,
+        };
+      }
       const commit = git(workDir, ["commit", "-m", message]);
       if (commit.status !== 0) {
         return {
@@ -409,7 +453,8 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
           mergeCommand,
         };
       }
-      commitHash = gitOk(workDir, ["rev-parse", "--short", "HEAD"]);
+      const head = git(workDir, ["rev-parse", "--short", "HEAD"]);
+      commitHash = head.status === 0 ? head.stdout.trim() : undefined;
       worktreeClean = true;
     }
   } else {
@@ -425,7 +470,21 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       };
     }
 
-    gitOk(workDir, ["add", "-A"]);
+    const staged = git(workDir, ["add", "-A"]);
+    if (staged.status !== 0) {
+      return {
+        status: "skipped",
+        reason: `git add failed: ${(staged.stderr || staged.stdout).trim()}`,
+      };
+    }
+
+    const secrets = stagedSecretPaths(workDir);
+    if (secrets.length > 0) {
+      return {
+        status: "skipped",
+        reason: `refusing to commit secret-like files: ${secrets.slice(0, 5).join(", ")}`,
+      };
+    }
 
     const commit = git(workDir, ["commit", "-m", message]);
     if (commit.status !== 0) {
@@ -435,7 +494,8 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       };
     }
 
-    commitHash = gitOk(workDir, ["rev-parse", "--short", "HEAD"]);
+    const head = git(workDir, ["rev-parse", "--short", "HEAD"]);
+    commitHash = head.status === 0 ? head.stdout.trim() : undefined;
     worktreeClean = true;
   }
 
@@ -447,9 +507,17 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     return branchResult("base commit is unknown");
   }
 
-  const branchCommits = Number(
-    gitOk(projectDir, ["rev-list", "--count", `${state.baseCommit}..${branch}`]),
-  );
+  const counted = git(projectDir, ["rev-list", "--count", `${state.baseCommit}..${branch}`]);
+  if (counted.status !== 0) {
+    return {
+      status: "skipped",
+      reason: `git rev-list failed: ${(counted.stderr || counted.stdout).trim()}`,
+      branch,
+      commit: commitHash,
+      mergeCommand,
+    };
+  }
+  const branchCommits = Number((counted.stdout ?? "").trim());
 
   if (branchExists && branchCommits === 0) {
     return {
@@ -467,7 +535,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       return {
         status: "merged",
         branch,
-        commit: gitOk(projectDir, ["rev-parse", "--short", "HEAD"]),
+        commit: shortHead(projectDir),
         reason: "already merged",
         mergeCommand,
       };
@@ -521,7 +589,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     return {
       status: "merged",
       branch,
-      commit: gitOk(projectDir, ["rev-parse", "--short", "HEAD"]),
+      commit: shortHead(projectDir),
       mergeCommand,
     };
   }
@@ -533,7 +601,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       return {
         status: "merged",
         branch,
-        commit: gitOk(projectDir, ["rev-parse", "--short", "HEAD"]),
+        commit: shortHead(projectDir),
         mergeCommand,
         resolution: outcome.resolution,
       };

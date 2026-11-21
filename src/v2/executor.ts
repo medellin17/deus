@@ -323,6 +323,25 @@ export class SessionExecutor implements Executor {
         }
       }
 
+      if (sessionID) {
+        await this.client.session.interrupt({ sessionID }).catch((cleanupError) => {
+          this.log(
+            `session interrupt failed: ${
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+            }`,
+          );
+        });
+        if (!this.options.keepSessions) {
+          await this.client.session.remove({ sessionID }).catch((removeError) => {
+            this.log(
+              `session cleanup failed: ${
+                removeError instanceof Error ? removeError.message : String(removeError)
+              }`,
+            );
+          });
+        }
+      }
+
       return {
         stepId: input.step.id,
         agent: input.step.agent,

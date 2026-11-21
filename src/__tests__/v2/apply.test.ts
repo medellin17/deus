@@ -537,4 +537,55 @@ void describe("applyRun", () => {
     assert.match(result.reason ?? "", /ignored files: ignored\.txt/);
     assert.equal(fs.readFileSync(path.join(repo, "ignored.txt"), "utf-8"), "local\n");
   });
+
+  void it("refuses to commit secret-like files from the worktree", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "two\n", "utf-8");
+    fs.writeFileSync(path.join(prepared.workDir, ".env"), "SECRET=1\n", "utf-8");
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state: stateFor(repo, prepared),
+      merge: true,
+    });
+
+    assert.equal(result.status, "skipped");
+    assert.match(result.reason ?? "", /secret-like files/);
+    assert.match(result.reason ?? "", /\.env/);
+    // No commit was created and the project was not touched.
+    assert.equal(git(repo, "log", "-1", "--format=%s"), "init");
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "one\n");
+    assert.equal(git(repo, "status", "--porcelain"), "");
+  });
+
+  void it("returns skipped instead of throwing when git fails mid-run", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "two\n", "utf-8");
+
+    const state = stateFor(repo, prepared);
+    state.baseCommit = "not-a-real-ref";
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state,
+      merge: true,
+    });
+
+    assert.equal(result.status, "skipped");
+    assert.match(result.reason ?? "", /rev-list/);
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "one\n");
+    assert.equal(git(repo, "status", "--porcelain"), "");
+
+    let mergeHeadAlive = true;
+    try {
+      git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD");
+    } catch {
+      mergeHeadAlive = false;
+    }
+    assert.equal(mergeHeadAlive, false);
+  });
 });
