@@ -244,9 +244,9 @@ export class SessionExecutor implements Executor {
       const response = await this.client.message.list({
         sessionID,
         order: "asc",
-        type: "assistant",
       });
-      const messages = response.data.filter(isAssistant);
+      const all = response.data;
+      const messages = all.filter(isAssistant);
 
       const transcript = messages
         .map(assistantText)
@@ -257,7 +257,10 @@ export class SessionExecutor implements Executor {
       const finalMessage =
         [...messages].reverse().find((message) => message.finish === "stop") ?? lastAssistant;
       const text = finalMessage ? assistantText(finalMessage) : "";
-      const structuredError = [...messages].reverse().find((message) => message.error)?.error;
+      const structuredError = [...all]
+        .reverse()
+        .map((message) => ("error" in message ? message.error : undefined))
+        .find((error) => error !== undefined);
       const error =
         structuredError?.message ??
         (aborted ? "run interrupted" : undefined) ??

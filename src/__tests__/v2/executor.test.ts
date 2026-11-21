@@ -103,3 +103,47 @@ describe("session cleanup on failure", () => {
     assert.equal(calls.remove, 0);
   });
 });
+
+describe("session failure reporting", () => {
+  void it("prefers the server error message over 'session failed'", async () => {
+    const client = {
+      session: {
+        create: async () => ({ id: "ses-1" }),
+        prompt: async () => undefined,
+        get: async () => ({ id: "ses-1", outcome: "failed", cost: 0 }),
+        interrupt: async () => ({ interrupted: false }),
+        remove: async () => undefined,
+      },
+      message: {
+        list: async () => ({
+          data: [
+            {
+              id: "m1",
+              type: "idle",
+              outcome: "failed",
+              time: { created: 1, updated: 1 },
+              error: { type: "unknown", message: 'Agent not found: "Explore"' },
+            },
+          ],
+        }),
+      },
+    } as unknown as OpenCodeClient;
+
+    const executor = new SessionExecutor(client, {
+      model: "test/model",
+      keepSessions: true,
+    });
+
+    const result = await executor.run({
+      step: { id: "s1", agent: "explore", task: "x" },
+      prompt: "x",
+      runId: "run-1",
+      index: 0,
+      workDir: "/tmp",
+      timeoutMs: 1000,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, 'Agent not found: "Explore"');
+  });
+});
