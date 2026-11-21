@@ -6,6 +6,10 @@ export interface PreparedWorkdir {
   workDir: string;
   worktree: boolean;
   repoRoot?: string;
+  /** HEAD the worktree was created from. */
+  baseCommit?: string;
+  /** Branch the main worktree was on when the run started. */
+  baseBranch?: string;
 }
 
 function git(cwd: string, args: string[]): string {
@@ -13,6 +17,48 @@ function git(cwd: string, args: string[]): string {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+function isIgnored(cwd: string, relativePath: string): boolean {
+  try {
+    git(cwd, ["check-ignore", "-q", "--no-index", relativePath]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A fresh worktree has no node_modules, so npm scripts fail there even though
+ * they pass in the project. Link the project's dependencies when git ignores
+ * them, which is the usual case. A non-ignored node_modules is left alone:
+ * otherwise apply would commit the link.
+ */
+function linkNodeModules(
+  projectDir: string,
+  workDir: string,
+  onLog?: (message: string) => void,
+): void {
+  const source = path.join(projectDir, "node_modules");
+  const target = path.join(workDir, "node_modules");
+
+  if (!fs.existsSync(source) || fs.existsSync(target)) return;
+
+  if (!isIgnored(workDir, "node_modules/")) {
+    onLog?.(
+      "node_modules exists but is not gitignored; not linking it into the worktree, checks may fail",
+    );
+    return;
+  }
+
+  try {
+    fs.symlinkSync(source, target, "dir");
+    onLog?.("linked node_modules into the worktree");
+  } catch (error) {
+    onLog?.(
+      `cannot link node_modules: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 export function prepareWorkdir(
@@ -33,6 +79,13 @@ export function prepareWorkdir(
   }
 
   const repoRoot = git(projectDir, ["rev-parse", "--show-toplevel"]);
+
+  if (path.resolve(projectDir) !== path.resolve(repoRoot)) {
+    throw new Error(
+      `--cwd must be the git repository root (${repoRoot}), got ${projectDir}`,
+    );
+  }
+
   const workDir = path.join(projectDir, ".deus", "worktrees", runId);
 
   if (fs.existsSync(workDir)) {
@@ -40,6 +93,13 @@ export function prepareWorkdir(
   }
 
   fs.mkdirSync(path.dirname(workDir), { recursive: true });
+  const baseCommit = git(repoRoot, ["rev-parse", "HEAD"]);
+  let baseBranch: string | undefined;
+  try {
+    baseBranch = git(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  } catch {
+    baseBranch = undefined;
+  }
 
   try {
     git(repoRoot, ["worktree", "add", "--detach", workDir, "HEAD"]);
@@ -51,8 +111,9 @@ export function prepareWorkdir(
     );
   }
 
-  onLog?.(`worktree: ${workDir}`);
-  return { workDir, worktree: true, repoRoot };
+  onLog?.(`worktree: ${workDir} (base ${baseCommit.slice(0, 7)})`);
+  linkNodeModules(projectDir, workDir, onLog);
+  return { workDir, worktree: true, repoRoot, baseCommit, baseBranch };
 }
 
 export function removeWorkdir(projectDir: string, workDir: string): void {

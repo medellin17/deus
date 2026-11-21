@@ -18,7 +18,13 @@ npm run v2 -- --cwd /path/to/project --pipeline build "your task"
 
 It runs deterministic pipelines (`build`, `fix`, `audit`), uses the shared OpenCode V2 service,
 answers permission requests by policy, checkpoints every step, and runs in a git worktree by default.
-See [`src/v2/README.md`](src/v2/README.md) for details, resume, and safety rules.
+Steps that change code are verified by project checks (`deus.json`) and retried with the failure
+output; a successful run is committed and merged with `--no-ff` when the project is on the same
+clean branch. A red baseline is compared by failing test names, so pre-existing failures do not
+block a run. Merge conflicts are resolved by the `build` agent, verified by checks, and committed;
+otherwise the `deus/run-*` branch is left for manual merge. `--pipeline auto` asks an LLM planner
+for a validated step list, `--plan-only` shows it before running.
+See [`src/v2/README.md`](src/v2/README.md) for details, config, resume, and safety rules.
 
 ## Legacy V1 quick start
 

@@ -64,6 +64,37 @@ void describe("permission policy", () => {
     );
   });
 
+  void it("denies secret edits and disguised destructive commands", () => {
+    const cases: Array<[string, string]> = [
+      ["read", "prod.env"],
+      ["read", "secrets/.env.local"],
+      ["read", ".envrc"],
+      ["edit", ".env"],
+      ["edit", "prod.env"],
+      ["edit", ".envrc"],
+      ["shell", "git -C repo push"],
+      ["shell", "rm -rf -- /"],
+      ["shell", "rm -r -f -- /"],
+      ["shell", "env"],
+      ["shell", "env -i"],
+      ["webfetch", "https://example.com"],
+    ];
+
+    for (const [action, resource] of cases) {
+      assert.equal(
+        decidePermission(DEFAULT_POLICY, { action, resources: [resource] }).decision,
+        "deny",
+        `${action} ${resource}`,
+      );
+    }
+
+    assert.equal(
+      decidePermission(DEFAULT_POLICY, { action: "shell", resources: ["env CI=1 npm test"] })
+        .decision,
+      "allow",
+    );
+  });
+
   void it("lets a policy file overrides the default decision", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deus-policy-"));
     tempDirs.push(dir);
@@ -86,5 +117,28 @@ void describe("permission policy", () => {
       decidePermission(policy, { action: "shell", resources: ["ls"] }).decision,
       "deny",
     );
+  });
+
+  void it("rejects a broken policy file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deus-policy-"));
+    tempDirs.push(dir);
+    const file = path.join(dir, "policy.json");
+
+    fs.writeFileSync(file, "{", "utf-8");
+    assert.throws(() => loadPolicy(file), /invalid JSON/);
+
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ rules: [{ match: "[", decision: "allow" }] }),
+      "utf-8",
+    );
+    assert.throws(() => loadPolicy(file), /not a valid regex/);
+
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ rules: [{ match: "x", decision: "maybe" }] }),
+      "utf-8",
+    );
+    assert.throws(() => loadPolicy(file), /decision/);
   });
 });

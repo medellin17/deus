@@ -170,6 +170,8 @@ export const PIPELINES: Record<string, PipelineStepDef[]> = {
     {
       id: "implement",
       agent: "build",
+      gate: true,
+      requireChanges: true,
       task: IMPLEMENTATION_PROMPT,
     },
     {
@@ -189,6 +191,8 @@ export const PIPELINES: Record<string, PipelineStepDef[]> = {
     {
       id: "fix",
       agent: "build",
+      gate: true,
+      requireChanges: true,
       task: FIX_IMPLEMENTATION_PROMPT,
     },
     {

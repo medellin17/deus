@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,9 @@ import {
 import type {
   Executor,
   ExecutorInput,
+  GateResult,
   PipelineStepDef,
+  RunState,
   StepExecution,
 } from "../../v2/types.ts";
 
@@ -22,6 +25,19 @@ const tempDirs: string[] = [];
 function tempDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deus-v2-test-"));
   tempDirs.push(dir);
+  return dir;
+}
+
+function gitRepo(): string {
+  const dir = tempDir();
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "deus-test"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "deus@example.com"], { cwd: dir });
+  fs.writeFileSync(path.join(dir, "base.txt"), "1\n", "utf-8");
+  fs.mkdirSync(path.join(dir, ".deus"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".deus", ".gitignore"), "*\n", "utf-8");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "init"], { cwd: dir });
   return dir;
 }
 
@@ -168,6 +184,93 @@ void describe("runPipeline", () => {
     assert.deepEqual(executor.calls, ["one"]);
   });
 
+  void it("keeps the cost of a failed attempt across resume", async () => {
+    const steps: PipelineStepDef[] = [{ id: "one", agent: "a", task: "First" }];
+    const firstOptions = baseOptions(
+      steps,
+      new FakeExecutor((input) => ({ ...failed(input, "boom"), cost: 0.25 })),
+    );
+
+    const first = await runPipeline(firstOptions);
+    assert.equal(first.state.status, "failed");
+    assert.ok(Math.abs((first.state.cost ?? 0) - 0.25) < 1e-9);
+
+    const second = await runPipeline({
+      ...firstOptions,
+      executor: new FakeExecutor((input) => ok(input, "done", 0.001)),
+      resume: loadRunState(firstOptions.projectDir, firstOptions.runId),
+    });
+
+    assert.equal(second.state.status, "succeeded");
+    assert.ok(Math.abs((second.state.cost ?? 0) - 0.251) < 1e-9);
+  });
+
+  void it("does not double count the carried cost against maxCost", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [
+      { id: "one", agent: "a", task: "First", gate: true },
+    ];
+    const firstOptions = baseOptions(
+      steps,
+      new FakeExecutor((input) => ({ ...failed(input, "boom"), cost: 0.5 })),
+      { projectDir: dir, workDir: dir },
+    );
+
+    const first = await runPipeline(firstOptions);
+    assert.equal(first.state.status, "failed");
+
+    const secondExecutor = new FakeExecutor((input, call) => {
+      if (call === 2) fs.writeFileSync(path.join(dir, "ok"), "1", "utf-8");
+      return ok(input, `done-${call}`, 0.1);
+    });
+
+    const second = await runPipeline({
+      ...firstOptions,
+      executor: secondExecutor,
+      checks: [{ name: "check", command: "test -f ok" }],
+      maxCost: 0.75,
+      resume: loadRunState(dir, "run-test"),
+    });
+
+    assert.equal(second.state.status, "succeeded");
+    assert.ok(Math.abs((second.state.cost ?? 0) - 0.7) < 1e-9);
+  });
+
+  void it("fails a change step that produced no changes", async () => {
+    const dir = gitRepo();
+    const steps: PipelineStepDef[] = [
+      { id: "impl", agent: "a", task: "Do", gate: true, requireChanges: true },
+    ];
+    const executor = new FakeExecutor((input) => ok(input, "done"));
+    const options = baseOptions(steps, executor, { projectDir: dir, workDir: dir });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /no changes/);
+  });
+
+  void it("fails the second change step that produced no changes", async () => {
+    const dir = gitRepo();
+    const steps: PipelineStepDef[] = [
+      { id: "a", agent: "x", task: "A", gate: true, requireChanges: true },
+      { id: "b", agent: "x", task: "B", gate: true, requireChanges: true },
+    ];
+    const executor = new FakeExecutor((input) => {
+      if (input.step.id === "a") {
+        fs.writeFileSync(path.join(dir, "a.txt"), "1", "utf-8");
+      }
+      return ok(input, `out-${input.step.id}`);
+    });
+    const options = baseOptions(steps, executor, { projectDir: dir, workDir: dir });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /no changes/);
+    assert.equal(result.state.steps[0].status, "succeeded");
+  });
+
   void it("does not start work when the signal is already aborted", async () => {
     const steps: PipelineStepDef[] = [{ id: "one", agent: "a", task: "First" }];
     const executor = new FakeExecutor((input) => ok(input, "out"));
@@ -182,5 +285,368 @@ void describe("runPipeline", () => {
     assert.equal(result.state.status, "interrupted");
     assert.equal(result.state.error, "run interrupted");
     assert.deepEqual(executor.calls, []);
+  });
+
+  void it("retries a gated step and passes on the second attempt", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input, call) => {
+      if (call === 2) fs.writeFileSync(path.join(dir, "ok"), "1", "utf-8");
+      return ok(input, `attempt-${call}`);
+    });
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      baseline: false,
+      checks: [{ name: "check", command: "test -f ok" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.equal(result.state.steps[0].attempt, 2);
+    assert.equal(result.state.steps[0].gate?.status, "passed");
+    assert.deepEqual(executor.calls, ["impl", "impl"]);
+    assert.match(executor.prompts[1], /Проверка не прошла/);
+    assert.ok(Math.abs((result.state.cost ?? 0) - 0.002) < 1e-9);
+    assert.ok(
+      fs.existsSync(path.join(runDirFor(dir, "run-test"), "step-00-impl-attempt-1.md")),
+    );
+  });
+
+  void it("fails a gated step when checks keep failing", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input) => ok(input, "done"));
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      baseline: false,
+      checks: [{ name: "check", command: "false" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /check "check" failed/);
+    assert.equal(result.state.steps[0].gate?.status, "failed");
+    assert.deepEqual(executor.calls, ["impl", "impl"]);
+  });
+
+  void it("reuses the gate output when resuming a failed step", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const checks = [{ name: "check", command: "test -f ok" }];
+    const firstOptions = baseOptions(
+      steps,
+      new FakeExecutor((input) => ok(input, "first")),
+      { projectDir: dir, workDir: dir, baseline: false, checks },
+    );
+
+    const first = await runPipeline(firstOptions);
+    assert.equal(first.state.status, "failed");
+    assert.equal(first.state.steps[0].gate?.status, "failed");
+
+    const secondExecutor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(dir, "ok"), "1", "utf-8");
+      return ok(input, "second");
+    });
+    const second = await runPipeline({
+      ...firstOptions,
+      executor: secondExecutor,
+      resume: loadRunState(dir, "run-test"),
+    });
+
+    assert.equal(second.state.status, "succeeded");
+    assert.match(secondExecutor.prompts[0], /Проверка не прошла/);
+    assert.equal(second.state.steps[0].attempt, 1);
+  });
+
+  void it("does not fail a step for pre-existing check failures", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input) => ok(input, "done"));
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      checks: [{ name: "check", command: "echo '✖ old'; exit 1" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.equal(result.state.baseline?.status, "failed");
+    assert.equal(result.state.steps[0].gate?.status, "passed");
+    assert.match(
+      result.state.steps[0].gate?.warnings?.join(" ") ?? "",
+      /same failures/,
+    );
+    assert.deepEqual(executor.calls, ["impl"]);
+  });
+
+  void it("fails on a failure that is not in the baseline", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(dir, "new"), "1", "utf-8");
+      return ok(input, "done");
+    });
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      checks: [
+        {
+          name: "check",
+          command: "if [ -f new ]; then echo '✖ new'; else echo '✖ old'; fi; exit 1",
+        },
+      ],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /new failures: new/);
+    assert.equal(result.state.steps[0].gate?.status, "failed");
+    assert.deepEqual(executor.calls, ["impl", "impl"]);
+  });
+
+  void it("does not stop at a red baseline check and catches a later regression", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(dir, "broken"), "1", "utf-8");
+      return ok(input, "done");
+    });
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      checks: [
+        { name: "test", command: "echo '✖ old'; exit 1" },
+        { name: "types", command: "if [ -f broken ]; then echo '✖ new'; exit 1; fi" },
+      ],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /types: check was green before the run/);
+  });
+
+  void it("passes when a red baseline becomes green", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const executor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(dir, "fixed"), "1", "utf-8");
+      return ok(input, "done");
+    });
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      checks: [{ name: "check", command: "test -f fixed" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.equal(result.state.baseline?.status, "failed");
+    assert.equal(result.state.steps[0].gate?.status, "passed");
+    assert.equal(result.state.steps[0].gate?.baselineStatus, "failed");
+  });
+
+  void it("ignores a stored baseline when comparison is disabled", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];
+    const now = new Date().toISOString();
+    const failedStep: StepExecution = {
+      stepId: "impl",
+      agent: "a",
+      sessionID: "ses-old",
+      status: "failed",
+      text: "",
+      transcript: "",
+      error: "previous failure",
+      startedAt: now,
+      endedAt: now,
+      durationMs: 1,
+      permissionDecisions: [],
+    };
+    const baseline: GateResult = {
+      status: "failed",
+      durationMs: 1,
+      checks: [
+        {
+          name: "check",
+          command: "echo '✖ old'; exit 1",
+          status: "failed",
+          exitCode: 1,
+          durationMs: 1,
+          output: "✖ old",
+        },
+      ],
+    };
+    const resume: RunState = {
+      version: 1,
+      runId: "run-test",
+      projectDir: dir,
+      workDir: dir,
+      worktree: false,
+      pipeline: "test",
+      task: "fix the bug",
+      model: "m",
+      status: "failed",
+      baseline,
+      steps: [failedStep],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const executor = new FakeExecutor((input) => ok(input, "done"));
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      baseline: false,
+      resume,
+      checks: [{ name: "check", command: "echo '✖ old'; exit 1" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.equal(result.state.steps[0].gate?.status, "failed");
+  });
+
+  void it("does not run checks for steps without a gate", async () => {
+    const dir = tempDir();
+    const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do" }];
+    const executor = new FakeExecutor((input) => ok(input, "done"));
+    const options = baseOptions(steps, executor, {
+      projectDir: dir,
+      workDir: dir,
+      checks: [{ name: "check", command: "false" }],
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.equal(result.state.steps[0].gate, undefined);
+    assert.deepEqual(executor.calls, ["impl"]);
+  });
+
+  void it("runs the planner and executes its plan", async () => {
+    const dir = tempDir();
+    const plan = {
+      goal: "do it",
+      steps: [
+        { id: "work", agent: "build", mode: "change", task: "change code" },
+        { id: "check", agent: "build", mode: "analyze", task: "review" },
+      ],
+    };
+    const executor = new FakeExecutor((input) => {
+      if (input.step.id === "work") {
+        fs.writeFileSync(path.join(dir, "changed.txt"), "1", "utf-8");
+      }
+      return input.step.id === "planner"
+        ? ok(input, `\`\`\`json\n${JSON.stringify(plan)}\n\`\`\``)
+        : ok(input, `out-${input.step.id}`);
+    });
+    const options = baseOptions([], executor, {
+      projectDir: dir,
+      workDir: dir,
+      pipeline: "auto",
+      planner: { agents: [{ name: "build" }, { name: "plan" }] },
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.equal(result.state.plan?.length, 2);
+    assert.equal(result.state.planner?.status, "succeeded");
+    assert.deepEqual(executor.calls, ["planner", "work", "check"]);
+    assert.ok(fs.existsSync(path.join(runDirFor(dir, "run-test"), "plan.json")));
+    assert.ok(fs.existsSync(path.join(runDirFor(dir, "run-test"), "planner.md")));
+  });
+
+  void it("retries the planner when its output is invalid", async () => {
+    const dir = tempDir();
+    const plan = {
+      goal: "do it",
+      steps: [{ id: "check", agent: "build", mode: "analyze", task: "review" }],
+    };
+    const executor = new FakeExecutor((input, call) =>
+      input.step.id === "planner" && call === 1
+        ? ok(input, "not json")
+        : ok(input, JSON.stringify(plan)),
+    );
+    const options = baseOptions([], executor, {
+      projectDir: dir,
+      workDir: dir,
+      pipeline: "auto",
+      planner: { agents: [{ name: "build" }] },
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "succeeded");
+    assert.deepEqual(executor.calls, ["planner", "planner", "check"]);
+    assert.match(executor.prompts[1], /не прошёл проверку/);
+  });
+
+  void it("fails when the planner never returns a valid plan", async () => {
+    const dir = tempDir();
+    const executor = new FakeExecutor((input) => ok(input, "still not json"));
+    const options = baseOptions([], executor, {
+      projectDir: dir,
+      workDir: dir,
+      pipeline: "auto",
+      planner: { agents: [{ name: "build" }] },
+    });
+
+    const result = await runPipeline(options);
+
+    assert.equal(result.state.status, "failed");
+    assert.match(result.state.error ?? "", /planner failed after 2 attempt/);
+    assert.deepEqual(executor.calls, ["planner", "planner"]);
+  });
+
+  void it("resumes a planned run from the stored plan", async () => {
+    const dir = tempDir();
+    const plan = {
+      goal: "do it",
+      steps: [
+        { id: "one", agent: "build", mode: "change", task: "first" },
+        { id: "two", agent: "build", mode: "analyze", task: "second" },
+      ],
+    };
+    const firstExecutor = new FakeExecutor((input) =>
+      input.step.id === "planner"
+        ? ok(input, JSON.stringify(plan))
+        : failed(input, "boom"),
+    );
+    const firstOptions = baseOptions([], firstExecutor, {
+      projectDir: dir,
+      workDir: dir,
+      pipeline: "auto",
+      planner: { agents: [{ name: "build" }] },
+    });
+
+    const first = await runPipeline(firstOptions);
+    assert.equal(first.state.status, "failed");
+    assert.equal(first.state.plan?.length, 2);
+
+    const secondExecutor = new FakeExecutor((input) => {
+      if (input.step.id === "one") {
+        fs.writeFileSync(path.join(dir, "changed.txt"), "1", "utf-8");
+      }
+      return ok(input, `out-${input.step.id}`);
+    });
+    const second = await runPipeline({
+      ...firstOptions,
+      steps: [],
+      planner: undefined,
+      executor: secondExecutor,
+      resume: loadRunState(dir, "run-test"),
+    });
+
+    assert.equal(second.state.status, "succeeded");
+    assert.deepEqual(secondExecutor.calls, ["one", "two"]);
   });
 });

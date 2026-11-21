@@ -12,6 +12,8 @@ interface ModelPrice {
  */
 const MODEL_PRICES: Record<string, ModelPrice> = {
   "opencode-go/deepseek-v4.1-flash": { input: 0.15, output: 0.6, cacheRead: 0.003 },
+  "tokenharbor/deepseek-v4.1-flash": { input: 0.3, output: 1.2, cacheRead: 0 },
+  "tokenharbor/deepseek-v4.1-flash:free": { input: 0, output: 0, cacheRead: 0 },
   "opencode-go/deepseek-v4-pro": { input: 0.66, output: 1.98, cacheRead: 0.022 },
   "opencode/deepseek-v4.1-flash": { input: 0.3, output: 1.2, cacheRead: 0.006 },
   "opencode/deepseek-v4-pro": { input: 1.74, output: 3.48, cacheRead: 0.145 },

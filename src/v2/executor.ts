@@ -13,9 +13,41 @@ import type {
   Executor,
   ExecutorInput,
   PermissionDecision,
+  PermissionRule,
   StepExecution,
   TokenUsage,
 } from "./types.ts";
+
+export const SESSION_OVERLAY: PermissionRule[] = [
+  { action: "shell", resource: "*", effect: "ask" },
+  { action: "websearch", resource: "*", effect: "ask" },
+  { action: "webfetch", resource: "*", effect: "ask" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  { action: "read", resource: "**/.env", effect: "ask" },
+  { action: "read", resource: "**/.env.*", effect: "ask" },
+  { action: "read", resource: "**/.envrc", effect: "ask" },
+  { action: "read", resource: "**/id_rsa", effect: "ask" },
+  { action: "read", resource: "**/id_ed25519", effect: "ask" },
+  { action: "read", resource: "**/*.pem", effect: "ask" },
+  { action: "read", resource: "**/*.key", effect: "ask" },
+  { action: "read", resource: "**/*.p12", effect: "ask" },
+  { action: "read", resource: "**/*.pfx", effect: "ask" },
+  { action: "read", resource: "**/.ssh/**", effect: "ask" },
+  { action: "read", resource: "**/.aws/**", effect: "ask" },
+  { action: "read", resource: "**/.gnupg/**", effect: "ask" },
+  { action: "edit", resource: "**/.env", effect: "ask" },
+  { action: "edit", resource: "**/.env.*", effect: "ask" },
+  { action: "edit", resource: "**/.envrc", effect: "ask" },
+  { action: "edit", resource: "**/*.pem", effect: "ask" },
+  { action: "edit", resource: "**/*.key", effect: "ask" },
+  { action: "edit", resource: "**/*.p12", effect: "ask" },
+  { action: "edit", resource: "**/*.pfx", effect: "ask" },
+  { action: "edit", resource: "**/id_rsa", effect: "ask" },
+  { action: "edit", resource: "**/id_ed25519", effect: "ask" },
+  { action: "edit", resource: "**/.ssh/**", effect: "ask" },
+  { action: "edit", resource: "**/.aws/**", effect: "ask" },
+  { action: "edit", resource: "**/.gnupg/**", effect: "ask" },
+];
 
 export interface SessionExecutorOptions {
   model: string;
@@ -93,11 +125,12 @@ export class SessionExecutor implements Executor {
         agent: input.step.agent,
         model: parseModelRef(this.options.model),
         location: { directory: input.workDir },
-        permissions: input.step.permissions,
+        permissions: [...SESSION_OVERLAY, ...(input.step.permissions ?? [])],
       });
       sessionID = session.id;
 
       const handled = new Set<string>();
+      const replyAttempts = new Map<string, number>();
 
       const pollPermissions = async (): Promise<void> => {
         try {
@@ -107,20 +140,38 @@ export class SessionExecutor implements Executor {
 
           for (const request of requests) {
             if (handled.has(request.id)) continue;
-            handled.add(request.id);
+
+            const attempts = replyAttempts.get(request.id) ?? 0;
+            if (attempts >= 5) {
+              handled.add(request.id);
+              this.log(
+                `permission reply failed 5 times, giving up: ${request.action} ${request.resources.join(" ")}`,
+              );
+              continue;
+            }
+            replyAttempts.set(request.id, attempts + 1);
 
             const verdict = decidePermission(this.options.policy, {
               action: request.action,
               resources: request.resources,
             });
 
-            await this.client.permission.reply({
-              sessionID,
-              requestID: request.id,
-              decision: verdict.decision === "allow" ? "once" : "reject",
-              message: verdict.reason,
-            });
+            try {
+              await this.client.permission.reply({
+                sessionID,
+                requestID: request.id,
+                decision: verdict.decision === "allow" ? "once" : "reject",
+                message: verdict.reason,
+              });
+            } catch (error) {
+              this.log(
+                `permission reply failed, will retry: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              continue;
+            }
 
+            replyAttempts.delete(request.id);
+            handled.add(request.id);
             permissionDecisions.push({
               requestID: request.id,
               action: request.action,
@@ -174,7 +225,7 @@ export class SessionExecutor implements Executor {
         }
 
         await pollPermissions();
-        await sleep(500);
+        await sleep(250);
 
         try {
           info = await this.client.session.get({ sessionID });
@@ -252,6 +303,26 @@ export class SessionExecutor implements Executor {
 
       return result;
     } catch (error) {
+      let tokens: TokenUsage | undefined;
+      let cost: number | undefined;
+      let costEstimated = false;
+
+      if (sessionID) {
+        try {
+          const info = await this.client.session.get({ sessionID });
+          tokens = mapTokens(info.tokens);
+          const reportedCost = info.cost ?? 0;
+          costEstimated = reportedCost <= 0 && tokens !== undefined;
+          cost = reportedCost > 0
+            ? reportedCost
+            : tokens
+              ? estimateCost(this.options.model, tokens)
+              : 0;
+        } catch {
+          // The session may already be gone; keep the error as is.
+        }
+      }
+
       return {
         stepId: input.step.id,
         agent: input.step.agent,
@@ -260,6 +331,9 @@ export class SessionExecutor implements Executor {
         text: "",
         transcript: "",
         error: error instanceof Error ? error.message : String(error),
+        tokens,
+        cost,
+        costEstimated,
         startedAt,
         endedAt: new Date().toISOString(),
         durationMs: Date.now() - started,

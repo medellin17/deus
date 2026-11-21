@@ -1,0 +1,8 @@
+{
+  "model": "tokenharbor/deepseek-v4.1-flash:free",
+  "maxCost": 0.2,
+  "checks": {
+    "test": "npm test",
+    "typecheck": "npm run typecheck"
+  }
+}

@@ -3,38 +3,58 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createOpenCodeClient } from "./client.ts";
+import { applyRun } from "./apply.ts";
+import { createOpenCodeClient, type OpenCodeClient } from "./client.ts";
+import { loadConfig, resolveChecks, type DeusConfig } from "./config.ts";
 import { SessionExecutor } from "./executor.ts";
 import { loadPolicy } from "./permissions.ts";
 import {
   loadRunState,
   makeRunId,
+  persistRunState,
   runDirFor,
   runPipeline,
   type PipelineProgress,
 } from "./pipeline.ts";
+import {
+  generatePlan,
+  planToSteps,
+  validatePlan,
+  type PlanAgent,
+} from "./planner.ts";
 import { getPipeline } from "./pipelines.ts";
-import type { PipelineStepDef, RunState } from "./types.ts";
+import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 
-const DEFAULT_MODEL = "opencode-go/deepseek-v4.1-flash#max";
+const DEFAULT_MODEL = "tokenharbor/deepseek-v4.1-flash:free";
 const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
 
 interface CliOptions {
   pipeline: string;
+  pipelineExplicit: boolean;
   cwd: string;
   resume?: string;
   model: string;
   modelExplicit: boolean;
   timeoutSeconds: number;
+  timeoutExplicit: boolean;
   maxCost?: number;
+  maxCostExplicit: boolean;
   worktree: boolean;
+  worktreeExplicit: boolean;
+  merge: boolean;
+  mergeExplicit: boolean;
+  gate: boolean;
+  baseline: boolean;
+  baselineExplicit: boolean;
   policy?: string;
   cleanup: boolean;
   json: boolean;
   smoke: boolean;
   direct: boolean;
   agent?: string;
+  planOnly: boolean;
+  fromPlan?: string;
   task: string;
 }
 
@@ -44,19 +64,29 @@ function printHelp(): void {
 Usage:
   node --import tsx src/v2/cli.ts [options] "task"
   node --import tsx src/v2/cli.ts --smoke
+  node --import tsx src/v2/cli.ts --plan-only "task"
+  node --import tsx src/v2/cli.ts --from-plan plan.json "task"
   node --import tsx src/v2/cli.ts --resume <runId> --cwd <project>
 
 Options:
-  --pipeline <name>    Pipeline to run: build, fix, audit (default: build)
+  --pipeline <name>    Pipeline: build, fix, audit, auto (default: build)
   --direct             Run one agent on the task (no pipeline)
   --agent <id>         Agent for --direct (default: build)
   --cwd <path>         Project directory (default: current directory)
   --resume <runId>     Resume a checkpointed run
+  --plan-only          Ask the planner for a plan and exit
+  --from-plan <file>   Run a plan produced by --plan-only
   --model <ref>        provider/model#variant (default: ${DEFAULT_MODEL})
   --timeout <seconds>  Per-step timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
   --max-cost <usd>     Abort after the total cost exceeds this value
   --policy <file>      JSON permission policy
   --no-worktree        Run in the project directory instead of a git worktree
+  --worktree           Force a git worktree even if deus.json disables it
+  --no-gate            Do not run project checks
+  --no-baseline        Do not compare checks with the untouched worktree
+  --baseline           Force baseline comparison even if deus.json disables it
+  --merge              Merge a successful run (default)
+  --no-merge           Keep the deus/run-* branch without merging
   --cleanup            Remove the worktree after a successful run
   --json               Print the final run state as JSON
   --smoke              Check service, model and session flow without a project
@@ -67,15 +97,25 @@ Options:
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     pipeline: "build",
+    pipelineExplicit: false,
     cwd: process.cwd(),
     model: DEFAULT_MODEL,
     modelExplicit: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+    timeoutExplicit: false,
+    maxCostExplicit: false,
     worktree: true,
+    worktreeExplicit: false,
+    merge: true,
+    mergeExplicit: false,
+    gate: true,
+    baseline: true,
+    baselineExplicit: false,
     cleanup: false,
     json: false,
     smoke: false,
     direct: false,
+    planOnly: false,
     task: "",
   };
 
@@ -96,6 +136,7 @@ function parseArgs(argv: string[]): CliOptions {
         process.exit(0);
       case "--pipeline":
         options.pipeline = next();
+        options.pipelineExplicit = true;
         break;
       case "--cwd":
         options.cwd = path.resolve(next());
@@ -112,18 +153,44 @@ function parseArgs(argv: string[]): CliOptions {
         if (!Number.isFinite(options.timeoutSeconds) || options.timeoutSeconds <= 0) {
           throw new Error("--timeout must be a positive number of seconds");
         }
+        options.timeoutExplicit = true;
         break;
       case "--max-cost":
         options.maxCost = Number(next());
         if (!Number.isFinite(options.maxCost) || options.maxCost < 0) {
           throw new Error("--max-cost must be a non-negative number");
         }
+        options.maxCostExplicit = true;
         break;
       case "--policy":
         options.policy = path.resolve(next());
         break;
       case "--no-worktree":
         options.worktree = false;
+        options.worktreeExplicit = true;
+        break;
+      case "--worktree":
+        options.worktree = true;
+        options.worktreeExplicit = true;
+        break;
+      case "--no-gate":
+        options.gate = false;
+        break;
+      case "--no-baseline":
+        options.baseline = false;
+        options.baselineExplicit = true;
+        break;
+      case "--baseline":
+        options.baseline = true;
+        options.baselineExplicit = true;
+        break;
+      case "--merge":
+        options.merge = true;
+        options.mergeExplicit = true;
+        break;
+      case "--no-merge":
+        options.merge = false;
+        options.mergeExplicit = true;
         break;
       case "--cleanup":
         options.cleanup = true;
@@ -139,6 +206,16 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--agent":
         options.agent = next();
+        break;
+      case "--plan-only":
+        options.planOnly = true;
+        break;
+      case "--from-plan":
+        options.fromPlan = path.resolve(next());
+        break;
+      case "--":
+        positional.push(...argv.slice(i + 1));
+        i = argv.length;
         break;
       default:
         if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
@@ -174,19 +251,78 @@ function formatDuration(ms: number): string {
 }
 
 function printProgress(event: PipelineProgress): void {
-  if (event.type === "step-start") {
-    log(`[${event.index + 1}] ${event.step.id} (${event.step.agent}) ...`);
-  } else if (event.type === "step-skip") {
-    log(`[${event.index + 1}] ${event.step.id} — already completed`);
-  } else if (event.type === "step-end") {
-    const { result } = event;
-    const status = result.status === "succeeded" ? "ok" : `failed: ${result.error}`;
-    log(
-      `[${event.index + 1}] ${event.step.id} — ${status} (${formatDuration(result.durationMs)}, ${formatCost(result.cost, result.costEstimated)})`,
-    );
-  } else {
-    log(`run ${event.state.status}: ${event.state.runId}`);
+  switch (event.type) {
+    case "baseline-start":
+      log("[baseline] running checks on the untouched worktree ...");
+      break;
+    case "baseline-end":
+      log(`[baseline] checks ${event.gate.status} (${formatDuration(event.gate.durationMs)})`);
+      break;
+    case "planner-start":
+      log(`[planner] attempt ${event.attempt} ...`);
+      break;
+    case "planner-end": {
+      const { result, plan } = event;
+      const status =
+        result.status === "succeeded"
+          ? `${plan?.length ?? 0} step(s)`
+          : `failed: ${result.error}`;
+      log(
+        `[planner] ${status} (${formatDuration(result.durationMs)}, ${formatCost(result.cost, result.costEstimated)})`,
+      );
+      break;
+    }
+    case "step-start":
+      log(`[${event.index + 1}] ${event.step.id} (${event.step.agent}) ...`);
+      break;
+    case "step-skip":
+      log(`[${event.index + 1}] ${event.step.id} — already completed`);
+      break;
+    case "step-retry":
+      log(
+        `[${event.index + 1}] ${event.step.id} — checks failed, retry ${event.attempt}/${event.maxAttempts}`,
+      );
+      break;
+    case "gate-start":
+      log(`[${event.index + 1}] ${event.step.id} — checks (attempt ${event.attempt}) ...`);
+      break;
+    case "gate-end": {
+      const warnings = event.gate.warnings?.length ?? 0;
+      log(
+        `[${event.index + 1}] ${event.step.id} — checks ${event.gate.status}${warnings > 0 ? `, ${warnings} warning(s)` : ""} (${formatDuration(event.gate.durationMs)})`,
+      );
+      break;
+    }
+    case "step-end": {
+      const { result } = event;
+      const status = result.status === "succeeded" ? "ok" : `failed: ${result.error}`;
+      log(
+        `[${event.index + 1}] ${event.step.id} — ${status} (${formatDuration(result.durationMs)}, ${formatCost(result.cost, result.costEstimated)})`,
+      );
+      break;
+    }
+    case "run-end":
+      log(`run ${event.state.status}: ${event.state.runId}`);
+      break;
   }
+}
+
+function printApply(result: ApplyResult): void {
+  if (result.status === "merged") {
+    const extra = result.resolution ? ", conflicts resolved" : "";
+    log(`apply:    merged ${result.branch} -> ${result.commit}${extra}`);
+    return;
+  }
+  if (result.status === "branch") {
+    log(`apply:    branch ${result.branch} (${result.reason ?? "not merged"})`);
+    if (result.mergeCommand) log(`merge:    ${result.mergeCommand}`);
+    return;
+  }
+  if (result.status === "no-changes") {
+    log("apply:    no changes");
+    return;
+  }
+  log(`apply:    skipped (${result.reason ?? "unknown"})`);
 }
 
 function printHumanResult(result: { runDir: string; state: RunState }): void {
@@ -198,7 +334,14 @@ function printHumanResult(result: { runDir: string; state: RunState }): void {
   log(`model:    ${state.model}`);
   log(`workdir:  ${state.workDir}`);
   log(`cost:     ~$${(state.cost ?? 0).toFixed(4)}`);
+  if (state.baseline) log(`baseline: ${state.baseline.status}`);
   log(`artifacts: ${result.runDir}`);
+  if (state.apply) printApply(state.apply);
+  const warnings = [
+    ...(state.baseline?.warnings ?? []),
+    ...state.steps.flatMap((step) => step.gate?.warnings ?? []),
+  ];
+  for (const warning of [...new Set(warnings)]) log(`warning:  ${warning}`);
   if (state.error) log(`error:    ${state.error}`);
 }
 
@@ -215,6 +358,59 @@ function warnAboutDirtyTree(projectDir: string): void {
     }
   } catch {
     // Not a git repository; prepareWorkdir already handles the fallback.
+  }
+}
+
+function resolvePolicyPath(
+  options: CliOptions,
+  config: DeusConfig,
+  projectDir: string,
+): string {
+  if (options.policy) {
+    if (!fs.existsSync(options.policy)) {
+      throw new Error(`policy file not found: ${options.policy}`);
+    }
+    return options.policy;
+  }
+
+  if (config.policy) {
+    const resolved = path.resolve(projectDir, config.policy);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`policy file not found: ${resolved}`);
+    }
+    return resolved;
+  }
+
+  return path.join(projectDir, ".deus", "policy.json");
+}
+
+async function loadAgents(client: OpenCodeClient, directory: string): Promise<PlanAgent[]> {
+  const response = await client.agent.list({ location: { directory } });
+  const seen = new Set<string>();
+  const agents: PlanAgent[] = [];
+
+  for (const agent of response.data) {
+    if (agent.hidden) continue;
+    if (/^(compaction|title|summary)$/i.test(agent.name)) continue;
+    const key = agent.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    agents.push({ name: agent.name, description: agent.description });
+  }
+
+  return agents;
+}
+
+function readPlanFile(file: string): unknown {
+  if (!fs.existsSync(file)) {
+    throw new Error(`plan file not found: ${file}`);
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch (error) {
+    throw new Error(
+      `plan file is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -260,6 +456,69 @@ async function runSmoke(options: CliOptions, signal: AbortSignal): Promise<numbe
   }
 }
 
+async function runPlanOnly(
+  options: CliOptions,
+  projectDir: string,
+  config: DeusConfig,
+  signal: AbortSignal,
+): Promise<number> {
+  if (!options.task) throw new Error("--plan-only requires a task");
+
+  warnAboutDirtyTree(projectDir);
+
+  const runId = makeRunId();
+  const model = options.modelExplicit
+    ? options.model
+    : (config.model ?? DEFAULT_MODEL);
+  const timeoutSeconds = options.timeoutExplicit
+    ? options.timeoutSeconds
+    : (config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
+  const maxCost = options.maxCostExplicit ? options.maxCost : config.maxCost;
+
+  const client = await createOpenCodeClient();
+  const executor = new SessionExecutor(client, {
+    model,
+    policy: loadPolicy(resolvePolicyPath(options, config, projectDir)),
+    keepSessions: false,
+    onLog: log,
+  });
+
+  const agents = await loadAgents(client, projectDir);
+  const outcome = await generatePlan(executor, {
+    task: options.task,
+    agents,
+    workDir: projectDir,
+    runId,
+    timeoutMs: timeoutSeconds * 1000,
+    signal,
+    onAttempt: (attempt) => log(`[planner] attempt ${attempt} ...`),
+  });
+
+  log(
+    `[planner] ${outcome.plan ? `${outcome.plan.steps.length} step(s)` : "failed"} (${formatDuration(outcome.execution.durationMs)}, ${formatCost(outcome.execution.cost, outcome.execution.costEstimated)})`,
+  );
+
+  if (!outcome.plan) {
+    log(`error: ${outcome.error ?? "planner failed"}`);
+    return 1;
+  }
+
+  const spent = (outcome.execution.cost ?? 0) + (outcome.execution.priorCost ?? 0);
+  if (maxCost !== undefined && spent > maxCost) {
+    log(`error: cost limit exceeded: $${spent.toFixed(4)} > $${maxCost.toFixed(4)}`);
+    return 1;
+  }
+
+  const runDir = runDirFor(projectDir, runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  const planFile = path.join(runDir, "plan.json");
+  fs.writeFileSync(planFile, `${JSON.stringify(outcome.plan, null, 2)}\n`, "utf-8");
+
+  log(`plan:     ${planFile}`);
+  console.log(JSON.stringify(outcome.plan, null, 2));
+  return 0;
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -279,91 +538,229 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!options.task && !options.resume) {
-    printHelp();
-    throw new Error("task is required (or use --resume)");
+  if (options.resume && options.fromPlan) {
+    throw new Error("--resume cannot be combined with --from-plan");
+  }
+
+  if (options.planOnly && options.resume) {
+    throw new Error("--plan-only cannot be combined with --resume");
+  }
+
+  if (options.planOnly && options.fromPlan) {
+    throw new Error("--plan-only cannot be combined with --from-plan");
   }
 
   const projectDir = path.resolve(options.cwd);
   ensureDeusDir(projectDir);
-  const policyPath = options.policy ?? path.join(projectDir, ".deus", "policy.json");
+  const config = loadConfig(projectDir);
 
-  let runId: string;
-  let state: RunState | undefined;
-  let workDir: string;
-  let worktree: boolean;
+  if (options.planOnly) {
+    process.exitCode = await runPlanOnly(options, projectDir, config, controller.signal);
+    return;
+  }
+
+  if (!options.task && !options.resume && !options.fromPlan) {
+    printHelp();
+    throw new Error("task is required (or use --resume)");
+  }
+
+  const state = options.resume ? loadRunState(projectDir, options.resume) : undefined;
+  const runId = state?.runId ?? makeRunId();
+  let task = state?.task ?? options.task;
+
   let pipelineName: string;
-  let task: string;
-
-  if (options.resume) {
-    state = loadRunState(projectDir, options.resume);
-    runId = state.runId;
-    workDir = state.workDir;
-    worktree = state.worktree;
+  if (state) {
     pipelineName = state.pipeline;
-    task = state.task;
+  } else if (options.fromPlan) {
+    pipelineName = "plan";
+  } else if (options.direct) {
+    pipelineName = "direct";
+  } else if (options.pipelineExplicit) {
+    pipelineName = options.pipeline;
+  } else {
+    pipelineName = config.pipeline ?? "build";
+  }
+
+  const model = options.modelExplicit
+    ? options.model
+    : (state?.model ?? config.model ?? DEFAULT_MODEL);
+  const timeoutSeconds = options.timeoutExplicit
+    ? options.timeoutSeconds
+    : (config.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
+  const maxCost = options.maxCostExplicit ? options.maxCost : config.maxCost;
+  const useWorktree = options.worktreeExplicit
+    ? options.worktree
+    : (config.worktree ?? true);
+  const merge = options.mergeExplicit ? options.merge : (config.merge ?? true);
+  const baseline = options.baselineExplicit
+    ? options.baseline
+    : (config.baseline ?? true);
+  const checks = options.gate ? resolveChecks(config, projectDir) : [];
+
+  if (options.gate && checks.length === 0) {
+    log(
+      "warning: no checks configured; the gate is disabled. Add checks to deus.json to verify runs.",
+    );
+  }
+
+  let workDir: string;
+  let worktreeUsed: boolean;
+  let baseCommit: string | undefined;
+  let baseBranch: string | undefined;
+
+  if (state) {
+    workDir = state.workDir;
+    worktreeUsed = state.worktree;
+    baseCommit = state.baseCommit;
+    baseBranch = state.baseBranch;
     log(`resuming ${runId} from ${state.steps.length} recorded step(s)`);
   } else {
-    runId = makeRunId();
-    task = options.task;
-    pipelineName = options.direct ? "direct" : options.pipeline;
-
-    if (options.worktree) warnAboutDirtyTree(projectDir);
-    const prepared = prepareWorkdir(projectDir, runId, options.worktree, log);
+    if (useWorktree) warnAboutDirtyTree(projectDir);
+    const prepared = prepareWorkdir(projectDir, runId, useWorktree, log);
     workDir = prepared.workDir;
-    worktree = prepared.worktree;
+    worktreeUsed = prepared.worktree;
+    baseCommit = prepared.baseCommit;
+    baseBranch = prepared.baseBranch;
     ensureDeusDir(workDir);
   }
 
-  const steps: PipelineStepDef[] =
-    pipelineName === "direct"
-      ? [
-          {
-            id: "direct",
-            agent: options.agent ?? state?.steps[0]?.agent ?? "build",
-            task: "{task}",
-          },
-        ]
-      : getPipeline(pipelineName);
-  const selectedModel =
-    options.resume && !options.modelExplicit && state ? state.model : options.model;
+  let steps: PipelineStepDef[];
+  let initialPlan: PlanStep[] | undefined;
+  if (state?.plan?.length) {
+    steps = planToSteps(state.plan);
+  } else if (pipelineName === "direct") {
+    steps = [
+      {
+        id: "direct",
+        agent: options.agent ?? state?.steps[0]?.agent ?? "build",
+        task: "{task}",
+        gate: true,
+      },
+    ];
+  } else if (pipelineName === "auto" || pipelineName === "plan") {
+    steps = [];
+  } else {
+    steps = getPipeline(pipelineName);
+  }
+
   const client = await createOpenCodeClient();
   const executor = new SessionExecutor(client, {
-    model: selectedModel,
-    policy: loadPolicy(policyPath),
+    model,
+    policy: loadPolicy(resolvePolicyPath(options, config, projectDir)),
     keepSessions: true,
     onLog: log,
   });
 
+  if (options.fromPlan) {
+    const agents = await loadAgents(client, workDir);
+    const plan = validatePlan(readPlanFile(options.fromPlan), agents);
+    steps = planToSteps(plan.steps);
+    initialPlan = plan.steps;
+    if (!task) task = plan.goal;
+  }
+
+  const planner =
+    pipelineName === "auto" && !state?.plan
+      ? { agents: await loadAgents(client, workDir) }
+      : undefined;
+
+  if (!state && steps.length === 0 && !planner) {
+    throw new Error(`pipeline "${pipelineName}" has no steps`);
+  }
+
   const result = await runPipeline({
     steps,
+    plan: initialPlan,
     pipeline: pipelineName,
     task,
     runId,
     projectDir,
     workDir,
-    worktree,
-    model: selectedModel,
-    timeoutMs: options.timeoutSeconds * 1000,
-    maxCost: options.maxCost,
+    worktree: worktreeUsed,
+    baseCommit,
+    baseBranch,
+    model,
+    timeoutMs: timeoutSeconds * 1000,
+    maxCost,
+    checks,
+    baseline,
+    planner,
     executor,
     resume: state,
     signal: controller.signal,
     onProgress: printProgress,
   });
 
+  if (result.state.status === "succeeded" && worktreeUsed) {
+    log("");
+    log("applying changes...");
+    const applied = await applyRun({
+      projectDir,
+      workDir,
+      state: result.state,
+      merge,
+      resolve: {
+        executor,
+        timeoutMs: timeoutSeconds * 1000,
+        checks,
+        baseline: baseline ? result.state.baseline : undefined,
+        maxCost,
+        signal: controller.signal,
+      },
+    });
+    result.state.apply = applied;
+    persistRunState(result.runDir, result.state);
+
+    if (applied.resolution) {
+      const file = path.join(result.runDir, "conflict-resolution.md");
+      const lines = [
+        "# Conflict resolution",
+        "",
+        `- Session: \`${applied.resolution.sessionID || "none"}\``,
+        `- Status: **${applied.resolution.status}**`,
+        `- Cost: ${formatCost(applied.resolution.cost, applied.resolution.costEstimated)}`,
+        applied.resolution.error ? `- Error: ${applied.resolution.error}` : "",
+        "",
+        "## Output",
+        "",
+        applied.resolution.text || "(empty)",
+      ];
+      fs.writeFileSync(file, `${lines.filter((line) => line !== "").join("\n")}\n`, "utf-8");
+    }
+  }
+
   printHumanResult(result);
 
-  if (options.cleanup && result.state.status === "succeeded" && worktree) {
-    removeWorkdir(projectDir, workDir);
-    log(`worktree removed: ${workDir}`);
+  const appliedStatus = result.state.apply?.status;
+  const safeToCleanup =
+    appliedStatus === "merged" ||
+    appliedStatus === "no-changes" ||
+    (!merge &&
+      appliedStatus === "branch" &&
+      result.state.apply?.commit !== undefined);
+
+  if (options.cleanup && result.state.status === "succeeded" && worktreeUsed) {
+    if (safeToCleanup) {
+      removeWorkdir(projectDir, workDir);
+      log(`worktree removed: ${workDir}`);
+    } else {
+      log("cleanup skipped: changes were not committed");
+    }
   }
 
   if (options.json) {
     console.log(JSON.stringify(result.state, null, 2));
   }
 
-  process.exitCode = result.state.status === "succeeded" ? 0 : 1;
+  const mergePending =
+    merge &&
+    worktreeUsed &&
+    result.state.status === "succeeded" &&
+    result.state.apply !== undefined &&
+    result.state.apply.status !== "merged" &&
+    result.state.apply.status !== "no-changes";
+
+  process.exitCode = result.state.status === "succeeded" ? (mergePending ? 2 : 0) : 1;
 }
 
 main().catch((error: unknown) => {
