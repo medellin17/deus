@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { loadAgents } from "./agents.ts";
 import { applyRun } from "./apply.ts";
-import { createOpenCodeClient, type OpenCodeClient } from "./client.ts";
+import { createOpenCodeClient } from "./client.ts";
 import { loadConfig, resolveChecks, type DeusConfig } from "./config.ts";
 import { SessionExecutor } from "./executor.ts";
 import { loadPolicy } from "./permissions.ts";
@@ -16,12 +17,7 @@ import {
   runPipeline,
   type PipelineProgress,
 } from "./pipeline.ts";
-import {
-  generatePlan,
-  planToSteps,
-  validatePlan,
-  type PlanAgent,
-} from "./planner.ts";
+import { generatePlan, planToSteps, validatePlan } from "./planner.ts";
 import { getPipeline } from "./pipelines.ts";
 import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
@@ -382,23 +378,6 @@ function resolvePolicyPath(
   }
 
   return path.join(projectDir, ".deus", "policy.json");
-}
-
-async function loadAgents(client: OpenCodeClient, directory: string): Promise<PlanAgent[]> {
-  const response = await client.agent.list({ location: { directory } });
-  const seen = new Set<string>();
-  const agents: PlanAgent[] = [];
-
-  for (const agent of response.data) {
-    if (agent.hidden) continue;
-    if (/^(compaction|title|summary)$/i.test(agent.name)) continue;
-    const key = agent.name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    agents.push({ name: agent.name, description: agent.description });
-  }
-
-  return agents;
 }
 
 function readPlanFile(file: string): unknown {
