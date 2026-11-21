@@ -9,11 +9,11 @@ function toPlanAgents(agents: AgentInfo[]): PlanAgent[] {
 
   for (const agent of agents) {
     if (agent.hidden) continue;
-    if (/^(compaction|title|summary)$/i.test(agent.name)) continue;
-    const key = agent.name.toLowerCase();
+    if (/^(compaction|title|summary)$/i.test(agent.id)) continue;
+    const key = agent.id.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    result.push({ name: agent.name, description: agent.description });
+    result.push({ name: agent.id, description: agent.description });
   }
 
   return result;

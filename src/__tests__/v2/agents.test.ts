@@ -5,6 +5,7 @@ import { loadAgents } from "../../v2/agents.ts";
 import type { OpenCodeClient } from "../../v2/client.ts";
 
 interface FakeAgent {
+  id: string;
   name: string;
   hidden?: boolean;
   description?: string;
@@ -18,6 +19,7 @@ function fakeClient(scoped: FakeAgent[], fallback: FakeAgent[]) {
         const scopedCall = input?.location !== undefined;
         calls.push(scopedCall ? "scoped" : "default");
         const data = (scopedCall ? scoped : fallback).map((agent) => ({
+          id: agent.id,
           name: agent.name,
           hidden: agent.hidden ?? false,
           description: agent.description,
@@ -31,7 +33,13 @@ function fakeClient(scoped: FakeAgent[], fallback: FakeAgent[]) {
 
 void describe("loadAgents", () => {
   void it("falls back to the default list when the scoped list is empty", async () => {
-    const { client, calls } = fakeClient([], [{ name: "build" }, { name: "plan" }]);
+    const { client, calls } = fakeClient(
+      [],
+      [
+        { id: "build", name: "Build" },
+        { id: "plan", name: "Plan" },
+      ],
+    );
     const agents = await loadAgents(client, "/tmp/fresh-project");
 
     assert.deepEqual(
@@ -42,7 +50,10 @@ void describe("loadAgents", () => {
   });
 
   void it("keeps the scoped list when it is not empty", async () => {
-    const { client, calls } = fakeClient([{ name: "local" }], [{ name: "build" }]);
+    const { client, calls } = fakeClient(
+      [{ id: "local", name: "Local" }],
+      [{ id: "build", name: "Build" }],
+    );
     const agents = await loadAgents(client, "/tmp/known-project");
 
     assert.deepEqual(
@@ -50,6 +61,16 @@ void describe("loadAgents", () => {
       ["local"],
     );
     assert.deepEqual(calls, ["scoped"]);
+  });
+
+  void it("returns the agent id, not its display name", async () => {
+    const { client } = fakeClient([{ id: "explore", name: "Explore" }], []);
+    const agents = await loadAgents(client, "/tmp/known-project");
+
+    assert.deepEqual(
+      agents.map((agent) => agent.name),
+      ["explore"],
+    );
   });
 
   void it("fails before the planner when both lists are empty", async () => {
