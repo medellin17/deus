@@ -20,10 +20,11 @@ function toPlanAgents(agents: AgentInfo[]): PlanAgent[] {
 }
 
 /**
- * The server only knows the agents of a directory after it has loaded that
- * location, which happens when a session is created there. A fresh project or
- * worktree therefore answers an empty scoped list, so fall back to the
- * server-wide default list.
+ * A directory can answer with an empty scoped agent list: observed for a fresh
+ * project root and for an unused temp directory, while a directory the server
+ * had answered for before returned the full list. The reason is not
+ * established, so fall back to the server-wide default list and let the caller
+ * fail when that is empty too.
  */
 export async function listAgents(
   client: OpenCodeClient,
