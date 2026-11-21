@@ -49,11 +49,14 @@ export const SESSION_OVERLAY: PermissionRule[] = [
   { action: "edit", resource: "**/.gnupg/**", effect: "ask" },
 ];
 
+export const DEFAULT_FIRST_OUTPUT_MS = 300_000;
+
 export interface SessionExecutorOptions {
   model: string;
   policy?: PermissionPolicy;
   keepSessions?: boolean;
   onLog?: (message: string) => void;
+  firstOutputMs?: number;
 }
 
 function isAssistant(message: SessionMessageInfo): message is SessionMessageAssistant {
@@ -93,7 +96,9 @@ function sleep(ms: number): Promise<void> {
  */
 export class SessionExecutor implements Executor {
   private readonly client: OpenCodeClient;
-  private readonly options: Required<Pick<SessionExecutorOptions, "model" | "policy" | "keepSessions">> &
+  private readonly options: Required<
+    Pick<SessionExecutorOptions, "model" | "policy" | "keepSessions" | "firstOutputMs">
+  > &
     Pick<SessionExecutorOptions, "onLog">;
 
   constructor(client: OpenCodeClient, options: SessionExecutorOptions) {
@@ -102,6 +107,7 @@ export class SessionExecutor implements Executor {
       model: options.model,
       policy: options.policy ?? DEFAULT_POLICY,
       keepSessions: options.keepSessions ?? true,
+      firstOutputMs: options.firstOutputMs ?? DEFAULT_FIRST_OUTPUT_MS,
       onLog: options.onLog,
     };
   }
@@ -197,6 +203,7 @@ export class SessionExecutor implements Executor {
 
       let timedOut = false;
       let aborted = false;
+      let noFirstOutput = false;
       let info = await this.client.session.get({ sessionID });
       let consecutiveErrors = 0;
 
@@ -220,6 +227,15 @@ export class SessionExecutor implements Executor {
 
         if (Date.now() - started > timeoutMs) {
           timedOut = true;
+          await interruptAndWait();
+          break;
+        }
+
+        const hasOutput =
+          !!info.tokens &&
+          (info.tokens.input + info.tokens.output + info.tokens.reasoning) > 0;
+        if (!hasOutput && Date.now() - started > this.options.firstOutputMs) {
+          noFirstOutput = true;
           await interruptAndWait();
           break;
         }
@@ -265,6 +281,9 @@ export class SessionExecutor implements Executor {
         structuredError?.message ??
         (aborted ? "run interrupted" : undefined) ??
         (timedOut ? `step timed out after ${Math.round(timeoutMs / 1000)}s` : undefined) ??
+        (noFirstOutput
+          ? `no model output after ${Math.round(this.options.firstOutputMs / 1000)}s: the provider did not start responding`
+          : undefined) ??
         (info.outcome === "failed" ? "session failed" : undefined) ??
         (info.outcome === "interrupted" ? "session interrupted" : undefined);
 

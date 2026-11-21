@@ -147,3 +147,105 @@ describe("session failure reporting", () => {
     assert.equal(result.error, 'Agent not found: "Explore"');
   });
 });
+
+describe("first output watchdog", () => {
+  function silentClient(calls: { interrupt: number }): OpenCodeClient {
+    let interrupted = false;
+    return {
+      session: {
+        create: async () => ({ id: "ses-1" }),
+        prompt: async () => undefined,
+        get: async () => ({
+          id: "ses-1",
+          outcome: interrupted ? "interrupted" : undefined,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost: 0,
+        }),
+        interrupt: async () => {
+          calls.interrupt++;
+          interrupted = true;
+          return { interrupted: true };
+        },
+        remove: async () => undefined,
+      },
+      permission: {
+        list: async () => [],
+      },
+      message: {
+        list: async () => ({ data: [] }),
+      },
+    } as unknown as OpenCodeClient;
+  }
+
+  void it("fails the step when the provider stays silent past firstOutputMs", async () => {
+    const calls = { interrupt: 0 };
+    const executor = new SessionExecutor(silentClient(calls), {
+      model: "test/model",
+      keepSessions: true,
+      firstOutputMs: 100,
+    });
+
+    const result = await executor.run({
+      step: { id: "s1", agent: "build", task: "do it" },
+      prompt: "do it",
+      runId: "run-1",
+      index: 0,
+      workDir: "/tmp",
+      timeoutMs: 60_000,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(
+      result.error ?? "",
+      /no model output after \d+s: the provider did not start responding/,
+    );
+    assert.equal(calls.interrupt, 1);
+  });
+
+  void it("does not trigger the watchdog once tokens appear", async () => {
+    const calls = { interrupt: 0 };
+    const client = {
+      session: {
+        create: async () => ({ id: "ses-1" }),
+        prompt: async () => undefined,
+        get: async () => ({
+          id: "ses-1",
+          outcome: undefined,
+          tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost: 0,
+        }),
+        interrupt: async () => {
+          calls.interrupt++;
+          return { interrupted: true };
+        },
+        remove: async () => undefined,
+      },
+      permission: {
+        list: async () => [],
+      },
+      message: {
+        list: async () => ({ data: [] }),
+      },
+    } as unknown as OpenCodeClient;
+
+    const executor = new SessionExecutor(client, {
+      model: "test/model",
+      keepSessions: true,
+      firstOutputMs: 100,
+    });
+
+    const result = await executor.run({
+      step: { id: "s1", agent: "build", task: "do it" },
+      prompt: "do it",
+      runId: "run-1",
+      index: 0,
+      workDir: "/tmp",
+      timeoutMs: 500,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, "step timed out after 1s");
+    assert.doesNotMatch(result.error ?? "", /no model output/);
+    assert.equal(calls.interrupt, 1);
+  });
+});
