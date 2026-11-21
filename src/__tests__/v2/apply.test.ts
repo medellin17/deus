@@ -424,6 +424,37 @@ void describe("applyRun", () => {
     assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "main\n");
   });
 
+  void it("refuses a merge when a check stages a file outside the conflicts", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "branch\n", "utf-8");
+    moveHeadWithConflict(repo);
+
+    const executor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(repo, "file.txt"), "merged\n", "utf-8");
+      return execution(input, "resolved");
+    });
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state: stateFor(repo, prepared),
+      merge: true,
+      resolve: {
+        executor,
+        timeoutMs: 1000,
+        checks: [
+          { name: "stage", command: "echo leaked > leaked.txt && git add leaked.txt" },
+        ],
+      },
+    });
+
+    assert.equal(result.status, "branch");
+    assert.match(result.reason ?? "", /checks changed unrelated files: leaked\.txt/);
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "main\n");
+    assert.equal(git(repo, "status", "--porcelain"), "");
+  });
+
   void it("aborts an unfinished merge even without baseBranch", async () => {
     const repo = makeRepo();
     const prepared = prepare(repo);

@@ -60,7 +60,7 @@ function conflictedFiles(projectDir: string): string[] {
 }
 
 function modifiedFiles(projectDir: string): string[] {
-  return listFiles(projectDir, ["diff", "--name-only"]);
+  return listFiles(projectDir, ["diff", "--name-only", "HEAD"]);
 }
 
 function hasConflictMarkers(filePath: string): boolean {
