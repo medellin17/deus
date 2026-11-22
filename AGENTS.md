@@ -2,6 +2,8 @@
 
 > **Единственный источник правды** по агентам, пайплайнам и Knowledge Base. README.md и ARCHITECTURE.md ссылаются сюда.
 
+> **Область действия:** этот документ описывает **legacy V1-оркестратор** (`src/orchestrator.ts`, V1 SDK, OpenCode 1.x). Актуальный раннер — V2-native в [`src/v2`](src/v2/README.md), его документация — [`src/v2/README.md`](src/v2/README.md).
+
 ## Обзор
 
 Multi-agent оркестратор на базе OpenCode SDK. Управляет 18 агентами (17 + sub-orchestrator) через HTTP API, имеет встроенную Knowledge Base (SQLite + FTS5), State DB для задач/чекпоинтов, DAG-движок и плагин мониторинга.

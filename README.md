@@ -1,12 +1,11 @@
 # Deus
 
-Multi-agent orchestrator for OpenCode with Knowledge Base, DAG engine, and auto-scaling.
+Two runners live in this repo:
 
-18 specialized agents (17 + sub-orchestrator). SQLite + FTS5 + Memory Tree. Hybrid orchestration (LLM conductor + static pipelines + DAG).
+- **Current — V2-native deterministic runner:** [`src/v2`](src/v2/README.md), for OpenCode 2.x. This is the one to use.
+- **Legacy — V1 orchestrator:** `src/orchestrator.ts`, the original multi-agent orchestrator (18 agents, Knowledge Base, DAG engine, auto-scaling). It uses the V1 SDK (`@opencode-ai/sdk`), targets OpenCode 1.x, and is not compatible with the V2 server API. Kept as a reference.
 
-> **OpenCode 2.x:** use the V2-native deterministic runner in [`src/v2`](src/v2/README.md).
-> The commands below use the legacy V1 SDK (`@opencode-ai/sdk`) and target OpenCode 1.x.
-> They are kept as a reference and are not compatible with the V2 server API.
+Everything below the "V2 runner" section describes the legacy V1 orchestrator.
 
 ## V2 runner (recommended for OpenCode 2.x)
 
