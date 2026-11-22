@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { BoardError, openBoard, type Board } from "../../v2/board.ts";
 import type { OpenCodeClient } from "../../v2/client.ts";
 import { runCodingTeam, selectReadyTasks, teamExitCode, TeamError } from "../../v2/team.ts";
+import type { LeadAdvisor, LeadDecision, LeadEvidence } from "../../v2/lead.ts";
 import type { Executor, ExecutorInput, StepExecution } from "../../v2/types.ts";
 
 const tempDirs: string[] = [];
@@ -96,6 +97,21 @@ function fakeExecutor(options: FakeOptions): {
     },
   };
 }
+
+function fakeAdvisor(byTask: Map<string, LeadDecision[]>) {
+  const calls: LeadEvidence[] = [];
+  const advisor: LeadAdvisor = async (evidence) => {
+    calls.push(evidence);
+    const queue = byTask.get(evidence.task.boardTaskId) ?? [];
+    const decision =
+      queue.shift() ??
+      ({ decision: "escalate", reason: "test: no decision left" } as LeadDecision);
+    return { decision, cost: 0.0001 };
+  };
+  return { advisor, calls };
+}
+
+const LEAD_NOTE = "remove broken.txt and create a.txt instead";
 
 const ALWAYS_OK = [{ name: "readme", command: "test -f readme.md" }];
 const NO_BROKEN = [{ name: "clean", command: "test ! -f broken.txt" }];
@@ -552,6 +568,310 @@ void describe("runCodingTeam", () => {
     assert.equal(second.errors, 1);
     assert.match(second.tasks[0]?.reason ?? "", /git repository/);
     assert.equal(fs.readdirSync(path.join(repo, ".deus", "worktrees")).length, 0);
+  });
+
+  void it("closes a failing task through the lead and counts it once", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const fixed = addTask(board, teamId, "fixable");
+    const hopeless = addTask(board, teamId, "hopeless");
+    const attempts = new Map<string, number>();
+    const { executor } = fakeExecutor({
+      run: (input) => {
+        const attempt = (attempts.get(input.step.id) ?? 0) + 1;
+        attempts.set(input.step.id, attempt);
+        if (input.step.id === fixed && attempt > 1) {
+          fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8");
+        } else {
+          fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8");
+        }
+      },
+    });
+    const { advisor, calls } = fakeAdvisor(
+      new Map([
+        [
+          fixed,
+          [{ decision: "rework", note: LEAD_NOTE, reason: "the check forbids broken.txt" }],
+        ],
+      ]),
+    );
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-leadcycle", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxRounds: 3,
+      advisor,
+    });
+
+    // One record per task, not one per attempt.
+    assert.equal(result.tasks.length, 2);
+    assert.equal(result.merged, 1);
+    assert.equal(result.review, 1);
+    assert.equal(result.waiting, 0);
+    assert.equal(result.rounds, 2);
+    assert.equal(teamExitCode(result), 2);
+    // 3 worker sessions at 0.001 plus 2 advisor calls at 0.0001.
+    assert.ok(Math.abs(result.cost - 0.0032) < 1e-9, `cost ${result.cost}`);
+    assert.ok(Math.abs(result.leadCost - 0.0002) < 1e-9, `leadCost ${result.leadCost}`);
+    assert.equal(board.getTask(fixed)?.status, "done");
+    assert.equal(board.getTask(hopeless)?.status, "review");
+    // The failing task was tried twice; the escalated one only once.
+    assert.equal(attempts.get(fixed), 2);
+    assert.equal(attempts.get(hopeless), 1);
+    // Each task is adjudicated once per run, even across rounds.
+    assert.equal(calls.length, 2);
+    assert.equal(result.tasks.find((task) => task.boardTaskId === fixed)?.lead?.decision, "rework");
+    assert.equal(
+      result.tasks.find((task) => task.boardTaskId === hopeless)?.lead?.decision,
+      "escalate",
+    );
+    assert.match(
+      board
+        .events({ taskId: hopeless, limit: 50 })
+        .map((event) => (event.payload as { text?: string }).text ?? "")
+        .join("\n"),
+      /auto-lead: escalated/,
+    );
+  });
+
+  void it("does not call the lead when the run has a single round", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "one shot");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8"),
+    });
+    let advised = 0;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-singleround", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxRounds: 1,
+      advisor: async () => {
+        advised += 1;
+        return { decision: { decision: "escalate", reason: "should not be asked" } };
+      },
+    });
+
+    assert.equal(advised, 0, "a single round has nothing to correct");
+    assert.equal(result.rounds, 1);
+    assert.equal(result.review, 1);
+  });
+
+  void it("stops before the next round when the cost cap is reached", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "expensive");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8"),
+    });
+    const { advisor, calls } = fakeAdvisor(new Map());
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-cost", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxRounds: 3,
+      maxCost: 0,
+      advisor,
+    });
+
+    assert.equal(calls.length, 0);
+    assert.equal(result.costCapped, true);
+    assert.equal(result.rounds, 1);
+    assert.equal(teamExitCode(result), 1);
+  });
+
+  void it("hands the task to a human when the rework budget is spent", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "always red");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8"),
+    });
+    const { advisor, calls } = fakeAdvisor(
+      new Map([[taskId, [
+        { decision: "rework", note: LEAD_NOTE, reason: "first" },
+        { decision: "rework", note: "another concrete instruction for the agent", reason: "second" },
+      ]]]),
+    );
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-budget", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxAttempts: 2,
+      maxRounds: 3,
+      advisor,
+    });
+
+    // The second decision can only be an escalate, so it is taken without a
+    // paid advisor call.
+    assert.equal(calls.length, 1);
+    assert.equal(result.tasks[0].lead?.decision, "escalate");
+    assert.match(result.tasks[0].lead?.reason ?? "", /budget is spent/);
+    // The runner's own block never fires: the lead stops one step earlier.
+    assert.equal(board.getTask(taskId)?.status, "review");
+    assert.doesNotMatch(board.getTask(taskId)?.blockedReason ?? "", /rework limit/);
+  });
+
+  void it("does not return a task with a note the lead already tried", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "stuck");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8"),
+    });
+    const same = { decision: "rework", note: LEAD_NOTE, reason: "same advice" } as LeadDecision;
+    const { advisor, calls } = fakeAdvisor(new Map());
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-stuck", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxAttempts: 5,
+      maxRounds: 4,
+      advisor: async (evidence, runId, index) => {
+        calls.push(evidence);
+        return { decision: { ...same }, cost: 0.0001 };
+      },
+    });
+
+    assert.equal(calls.length, 2);
+    assert.equal(result.tasks[0].lead?.decision, "escalate");
+    assert.match(result.tasks[0].lead?.reason ?? "", /repeated an earlier note/);
+  });
+
+  void it("heals a merge conflict by starting the next attempt from the merged HEAD", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const first = addTask(board, teamId, "first");
+    const second = addTask(board, teamId, "second");
+
+    // Both agents finish before either merge, otherwise the second worktree is
+    // simply cut after the first merge and the conflict never happens.
+    let arrived = 0;
+    let open: (() => void) | undefined;
+    const barrier = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const { executor } = fakeExecutor({
+      run: async (input) => {
+        fs.writeFileSync(
+          path.join(input.workDir, "readme.md"),
+          input.step.id === first ? "one\n" : "two\n",
+          "utf-8",
+        );
+        arrived += 1;
+        if (arrived === 2) open?.();
+        if (arrived <= 2) await barrier;
+      },
+    });
+    const { advisor, calls } = fakeAdvisor(
+      new Map([
+        [first, [{ decision: "rework", note: LEAD_NOTE, reason: "try again" }]],
+        [second, [{ decision: "rework", note: LEAD_NOTE, reason: "try again" }]],
+      ]),
+    );
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-conflictlead", executor),
+      autoLead: true,
+      maxRounds: 3,
+      maxParallel: 2,
+      advisor,
+    });
+
+    // Round 1: both run, the second merge conflicts. Round 2: the returned task
+    // is cut from the HEAD that already holds the first one, so it merges.
+    assert.equal(result.merged, 2);
+    assert.equal(result.review, 0);
+    assert.equal(result.rounds, 2);
+    assert.equal(calls.length, 1, "only the conflicting task is adjudicated");
+    assert.equal(calls[0].merge, "conflict");
+    assert.equal(result.tasks.filter((task) => task.lead?.decision === "rework").length, 1);
+  });
+
+  void it("runs a dependent task in the same run once its dependency merges", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const first = addTask(board, teamId, "first");
+    const second = board.createTask({
+      teamId,
+      title: "second",
+      goal: "g",
+      actor: "lead",
+      dependsOn: [first],
+    }).boardTaskId;
+    const { executor } = fakeExecutor({
+      run: (input) =>
+        fs.writeFileSync(path.join(input.workDir, `${input.step.id}.txt`), "x\n", "utf-8"),
+    });
+    const { advisor, calls } = fakeAdvisor(new Map());
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-chain", executor),
+      autoLead: true,
+      maxRounds: 3,
+      advisor,
+    });
+
+    assert.equal(result.merged, 2);
+    assert.equal(result.rounds, 2);
+    assert.equal(result.waiting, 0);
+    assert.equal(calls.length, 0, "no failure, so the lead is never asked");
+    assert.equal(board.getTask(second)?.status, "done");
+  });
+
+  void it("escalates instead of looping when an advisor returns no note", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "no note");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8"),
+    });
+    let asked = 0;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-nonote", executor),
+      checks: NO_BROKEN,
+      autoLead: true,
+      maxRounds: 4,
+      advisor: async () => {
+        asked += 1;
+        return { decision: { decision: "rework" } as LeadDecision, cost: 0 };
+      },
+    });
+
+    assert.equal(asked, 1);
+    assert.equal(result.tasks[0].lead?.decision, "escalate");
+    assert.match(result.tasks[0].lead?.reason ?? "", /without a usable note/);
+    assert.equal(board.getTask(taskId)?.status, "review");
+  });
+
+  void it("does not retry an infrastructure failure round after round", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "detached");
+    git(repo, "checkout", "-q", "--detach");
+    const { executor, calls } = fakeExecutor({ run: () => undefined });
+    const { advisor, calls: advised } = fakeAdvisor(new Map());
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-norespin", executor),
+      autoLead: true,
+      maxRounds: 5,
+      advisor,
+    });
+
+    // Nothing merged, nothing was returned: another round would repeat the
+    // same broken start.
+    assert.equal(result.rounds, 1);
+    assert.equal(calls.length, 0);
+    assert.equal(advised.length, 0);
+    assert.equal(result.errors, 1);
   });
 
   void it("refuses to start on a dirty project", async () => {

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { Board, BoardStatus, BoardTask, Verification } from "./board.ts";
+import { BoardError } from "./board.ts";
+import type { Board, BoardEvent, BoardStatus, BoardTask, Verification } from "./board.ts";
 import type { OpenCodeClient } from "./client.ts";
 import { SessionExecutor } from "./executor.ts";
 import { applyBaseline, runGate } from "./gate.ts";
@@ -16,6 +17,13 @@ import {
   revParse,
   worktreeStatus,
 } from "./gitflow.ts";
+import {
+  createLeadAdvisor,
+  gateFromVerification,
+  mergeFromVerification,
+  type LeadAdvisor,
+  type LeadDecision,
+} from "./lead.ts";
 import { recordStepSession } from "./sessions.ts";
 import type { CheckCommand, Executor, GateResult } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
@@ -24,6 +32,8 @@ export const DEFAULT_MAX_PARALLEL = 3;
 export const MAX_PARALLEL = 8;
 /** A task that keeps coming back is stopped instead of looping forever. */
 export const DEFAULT_MAX_ATTEMPTS = 3;
+/** Hard ceiling for the auto-lead loop; each round is a full pool of agents. */
+export const MAX_ROUNDS = 9;
 
 /** Errors that are the operator's fault, reported as `error: <code>: <text>`. */
 export class TeamError extends Error {
@@ -55,6 +65,18 @@ export interface CodingTeamOptions {
   keepWorktrees?: boolean;
   /** Explicit task list; otherwise every ready task of the team is taken. */
   taskIds?: string[];
+  /** Let a tool-less advisor decide rework/escalate for failed tasks. */
+  autoLead?: boolean;
+  /** Pools per run, including the first one. Defaults to maxAttempts, capped. */
+  maxRounds?: number;
+  /** Stop the run (and the loop) once the total cost reaches this. */
+  maxCost?: number;
+  /** Board actor for the advisor's decisions. */
+  leadActor?: string;
+  /** Agent for the advisor session; it runs under deny-all permissions. */
+  leadAgent?: string;
+  /** Test seam: replaces the model call with a decision function. */
+  advisor?: LeadAdvisor;
   /** Test seam: replaces the session executor. */
   executor?: Executor;
   signal?: AbortSignal;
@@ -74,14 +96,19 @@ export interface TaskRunResult {
   verification?: Verification;
   cost?: number;
   reason?: string;
+  /** How the auto-lead closed this task, when it ran. */
+  lead?: { decision: LeadDecision["decision"]; reason: string };
 }
 
 /** 0 — everything done, 2 — work left for a human, 1 — infrastructure error. */
 export function teamExitCode(result: TeamRunResult): number {
   if (result.errors > 0) return 1;
+  // A cost cap is a runner-side stop, like the pipeline's own cap.
+  if (result.costCapped) return 1;
   if (result.review + result.blocked > 0) return 2;
   // An interrupted run did not finish the queue: that is work left, not success.
   if (result.tasks.some((task) => task.reason === "interrupted")) return 2;
+  if (result.tasks.some((task) => task.reason?.startsWith("returned for rework"))) return 2;
   if (result.waiting > 0) return 2;
   return 0;
 }
@@ -96,7 +123,19 @@ export interface TeamRunResult {
   skipped: number;
   /** Tasks of the team still waiting for their turn after the run. */
   waiting: number;
+  /** Pools actually executed. */
+  rounds: number;
+  /** Part of `cost` spent on the advisor. */
+  leadCost: number;
+  /** The run stopped because it reached `maxCost`. */
+  costCapped: boolean;
   cost: number;
+}
+
+/** Same instruction, different whitespace and case. */
+function sameNote(left: string, right: string): boolean {
+  const norm = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
+  return norm(left) === norm(right);
 }
 
 const RUN_ID = /^run-[0-9A-Za-z]+$/;
@@ -108,15 +147,17 @@ function reworkEvents(board: Board, taskId: string) {
     .filter((event) => event.type === "task/reworked");
 }
 
-/** Notes the lead attached to the times this task was sent back. */
-export function reworkNotes(board: Board, taskId: string, limit = 3): string[] {
-  const notes = reworkEvents(board, taskId)
+function notesFromEvents(events: BoardEvent[], limit = 3): string[] {
+  return events
     .map((event) => (event.payload as { note?: unknown }).note)
     .filter((note): note is string => typeof note === "string" && note.trim().length > 0)
     .slice(0, limit)
     .reverse();
+}
 
-  return notes;
+/** Notes the lead attached to the times this task was sent back. */
+export function reworkNotes(board: Board, taskId: string, limit = 3): string[] {
+  return notesFromEvents(reworkEvents(board, taskId), limit);
 }
 
 /** The branch a previous attempt left behind, if the board still knows it. */
@@ -340,7 +381,19 @@ function attachAgentCommit(
 async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResult }): Promise<TaskRunResult> {
   const { board, options, actor, agent } = deps;
   const base = { boardTaskId: task.boardTaskId, title: task.title };
-  const claim = board.claim(task.boardTaskId, actor);
+  let claim: ReturnType<Board["claim"]>;
+  try {
+    claim = board.claim(task.boardTaskId, actor);
+  } catch (error) {
+    // The board moved between selection and claim (another process accepted,
+    // cancelled or blocked the task). That is a normal race. A storage failure
+    // is not: it must not look like "nothing to do".
+    if (!(error instanceof BoardError)) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ...base, status: "error", reason: `cannot claim the task: ${reason}` };
+    }
+    return { ...base, status: "skipped", reason: `the board moved: ${error.message}` };
+  }
   if (!claim) {
     return { ...base, status: "skipped", reason: "another runner holds the task" };
   }
@@ -382,7 +435,12 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
   const fail = (reason: string, status: TaskRunResult["status"]): TaskRunResult => {
     const current = board.getTask(task.boardTaskId)?.status;
     if (current === "done" || current === "cancelled") {
-      return { ...base, status: current === "done" ? "merged" : "skipped", boardStatus: current, reason };
+      return {
+        ...base,
+        status: "skipped",
+        boardStatus: current,
+        reason: `closed elsewhere: ${reason}`,
+      };
     }
     const note = reason.slice(0, 500);
     try {
@@ -664,7 +722,7 @@ export async function runCodingTeam(
   if (options.checks.length === 0) {
     throw new TeamError(
       "no_checks",
-      "a coding team cannot mark work done without checks; configure \"checks\" or pass --check",
+      "a coding team cannot mark work done without checks; add \"checks\" to deus.json",
     );
   }
 
@@ -686,10 +744,12 @@ export async function runCodingTeam(
   }
 
   const release = acquireLock(projectDir, options.runId);
+  let leadDir: string | undefined;
   try {
+    // Everything below is per run, not per round: one lock, one baseline, one
+    // merge queue, one sweep.
     const short = shortRun(options.runId);
-    const baselineId = `baseline-${short}`;
-    const prepared = prepareWorkdir(projectDir, baselineId, true);
+    const prepared = prepareWorkdir(projectDir, `baseline-${short}`, true);
     if (!prepared.worktree) {
       throw new TeamError("not_git", "--team-run needs a git repository with a checked-out branch");
     }
@@ -700,9 +760,6 @@ export async function runCodingTeam(
     } finally {
       removeWorkdir(projectDir, prepared.workDir);
     }
-
-    const tasks = selectReadyTasks(board, options.teamId, options.taskIds);
-    options.onProgress?.(`tasks: ${tasks.length}, parallel: ${parallel}`);
 
     const actor = options.actor ?? "team";
     const agent = options.agent ?? "build";
@@ -735,43 +792,262 @@ export async function runCodingTeam(
       count: { value: 0 },
     };
 
-    const results: TaskRunResult[] = new Array(tasks.length);
-    await pool(tasks, parallel, async (task, index) => {
-      if (options.signal?.aborted) {
-        results[index] = {
-          boardTaskId: task.boardTaskId,
-          title: task.title,
-          status: "skipped",
-          boardStatus: task.status,
-          reason: "interrupted",
-        };
-        return;
-      }
-      const result = await runTask(task, deps, baselineBox);
-      results[index] = result;
+    const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS));
+    const maxRounds = Math.min(
+      MAX_ROUNDS,
+      Math.max(1, Math.trunc(options.maxRounds ?? maxAttempts)),
+    );
+    if (options.maxRounds === undefined && maxAttempts > MAX_ROUNDS) {
       options.onProgress?.(
-        `task ${task.boardTaskId}: ${result.status}${result.reason ? ` (${result.reason})` : ""}`,
+        `auto-lead: rounds default ${maxAttempts} clamped to ${MAX_ROUNDS}; pass --team-max-rounds`,
       );
+    }
+
+    const leadActor = options.leadActor ?? "auto-lead";
+    // One round cannot correct anything, so there is nothing for a lead to do.
+    const autoLead = options.autoLead === true && maxRounds > 1;
+    if (options.autoLead === true && !autoLead) {
+      options.onProgress?.("auto-lead: skipped, a single round cannot correct anything");
+    }
+    // An empty directory: even a tool the deny list does not name would find
+    // nothing to read or change.
+    leadDir = autoLead ? path.join(projectDir, ".deus", "lead", short) : undefined;
+    if (leadDir !== undefined) fs.mkdirSync(leadDir, { recursive: true });
+
+    const advisor: LeadAdvisor | undefined = autoLead
+      ? options.advisor ??
+        createLeadAdvisor(client, {
+          model: options.model,
+          timeoutMs: options.timeoutMs,
+          agent: options.leadAgent ?? agent,
+          workDir: leadDir as string,
+          signal: options.signal,
+          onLog: (line) => options.onProgress?.(line),
+        })
+      : undefined;
+
+    // One record per task, last write wins: a task that fails in round 1 and
+    // merges in round 2 must not be counted twice.
+    const results = new Map<string, TaskRunResult>();
+    const attempted = new Set<string>();
+    const adjudicated = new Set<string>();
+    let workCost = 0;
+    let leadCost = 0;
+    let rounds = 0;
+    let costCapped = false;
+    let mergedThisRound = 0;
+    const costNow = () => workCost + leadCost;
+    const cap = options.maxCost;
+
+    for (let round = 1; round <= maxRounds; round++) {
+      // On the first round an abort still lets the pool mark every ready task
+      // as skipped; the run did not touch the board, and the summary says so.
+      if (round > 1 && options.signal?.aborted) break;
+      if (round > 1 && cap !== undefined && costNow() >= cap) {
+        costCapped = true;
+        options.onProgress?.(`cost cap reached (~$${costNow().toFixed(4)}), stopping`);
+        break;
+      }
+
+      const ready = selectReadyTasks(board, options.teamId, options.taskIds);
+      if (ready.length === 0) break;
+      rounds = round;
+      options.onProgress?.(`round ${round}/${maxRounds}: ${ready.length} task(s), parallel: ${parallel}`);
+
+      mergedThisRound = 0;
+      await pool(ready, parallel, async (task) => {
+        if (options.signal?.aborted) {
+          const previous = results.get(task.boardTaskId);
+          results.set(task.boardTaskId, {
+            boardTaskId: task.boardTaskId,
+            title: task.title,
+            status: "skipped",
+            boardStatus: task.status,
+            reason: "interrupted",
+            lead: previous?.lead,
+          });
+          return;
+        }
+
+        if (cap !== undefined && costNow() >= cap) {
+          costCapped = true;
+          results.set(task.boardTaskId, {
+            boardTaskId: task.boardTaskId,
+            title: task.title,
+            status: "skipped",
+            boardStatus: task.status,
+            reason: "stopped by the cost cap",
+            lead: results.get(task.boardTaskId)?.lead,
+          });
+          return;
+        }
+
+        attempted.add(task.boardTaskId);
+        const result = await runTask(task, deps, baselineBox);
+        // A task that merged in a later round keeps the decision that got it
+        // there: the record is per task, the history is not thrown away.
+        const previous = results.get(task.boardTaskId);
+        results.set(task.boardTaskId, { ...result, lead: previous?.lead ?? result.lead });
+        workCost += result.cost ?? 0;
+        if (result.status === "merged") mergedThisRound += 1;
+        options.onProgress?.(
+          `task ${task.boardTaskId}: ${result.status}${result.reason ? ` (${result.reason})` : ""}`,
+        );
+      });
+
+      // The last round has nothing to feed: a rework there would never run.
+      if (!advisor || round >= maxRounds) break;
+
+      const reviews = board
+        .list({ teamId: options.teamId, status: "review", limit: 1_000 })
+        .filter(
+          (task) =>
+            attempted.has(task.boardTaskId) &&
+            !adjudicated.has(task.boardTaskId) &&
+            results.get(task.boardTaskId)?.status === "review",
+        );
+
+      let reworked = 0;
+      for (const task of reviews) {
+        if (options.signal?.aborted) break;
+        if (cap !== undefined && costNow() >= cap) {
+          costCapped = true;
+          options.onProgress?.(`cost cap reached (~$${costNow().toFixed(4)}), stopping`);
+          break;
+        }
+
+        const gate = gateFromVerification(task.verification);
+        const mergeStatus = mergeFromVerification(task.verification);
+        const branch = previousBranch(task);
+        const diff = branch ? branchDiff(projectDir, branch) : undefined;
+        if (branch && diff === undefined) {
+          options.onProgress?.(`lead: ${task.boardTaskId} branch ${branch} has no readable diff`);
+        }
+        const events = reworkEvents(board, task.boardTaskId);
+        const notes = notesFromEvents(events);
+        const reworks = events.length;
+
+        // A call that can only end in an escalate is not worth paying for.
+        let decision: LeadDecision;
+        if (reworks + 1 >= maxAttempts) {
+          decision = {
+            decision: "escalate",
+            reason: `rework budget is spent (${reworks}/${Math.max(0, maxAttempts - 1)})`,
+          };
+        } else {
+          const verdict = await advisor(
+            { task, gate, diff, merge: mergeStatus, notes, reworks },
+            options.runId,
+            deps.count.value++,
+          );
+          leadCost += verdict.cost ?? 0;
+          decision = verdict.decision;
+
+          const note = typeof decision.note === "string" ? decision.note.trim() : "";
+          if (decision.decision === "rework" && note.length === 0) {
+            // The shipped parser never lets this through; a custom advisor can.
+            decision = { decision: "escalate", reason: "advisor returned rework without a usable note" };
+          } else if (decision.decision === "rework" && notes.some((old) => sameNote(old, note))) {
+            decision = {
+              decision: "escalate",
+              reason: "auto-lead repeated an earlier note; the next attempt would be the same",
+            };
+          } else if (
+            decision.decision === "rework" &&
+            mergeStatus !== undefined &&
+            mergeStatus !== "merged" &&
+            reworks >= 1
+          ) {
+            decision = {
+              decision: "escalate",
+              reason: `merge ${mergeStatus} again; ordering of tasks is a human decision`,
+            };
+          }
+        }
+
+        if (decision.decision === "rework") {
+          try {
+            board.addMessage(task.boardTaskId, leadActor, `auto-lead: ${decision.reason}`);
+            board.rework(task.boardTaskId, leadActor, decision.note);
+            reworked += 1;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            decision = { decision: "escalate", reason: `could not return the task: ${reason}` };
+          }
+        }
+
+        // The record describes what actually happened, not what was attempted.
+        const current = results.get(task.boardTaskId);
+        if (current) {
+          results.set(task.boardTaskId, {
+            ...current,
+            lead: { decision: decision.decision, reason: decision.reason },
+          });
+        }
+        options.onProgress?.(
+          `lead: ${task.boardTaskId} ${decision.decision} (${decision.reason})`,
+        );
+
+        if (decision.decision !== "rework") {
+          // Escalation is final for this run: the same task must not be put in
+          // front of the model again in the next round.
+          adjudicated.add(task.boardTaskId);
+          try {
+            board.addMessage(task.boardTaskId, leadActor, `auto-lead: escalated — ${decision.reason}`);
+          } catch {
+            // The board moved under us; the run summary still reports it.
+          }
+        }
+      }
+
+      if (reworked === 0) {
+        // Only a merge can unblock a dependent task. Without one, looping would
+        // just retry the same failing work (a detached repo, a lost claim).
+        if (mergedThisRound === 0) break;
+        const next = selectReadyTasks(board, options.teamId, options.taskIds);
+        if (next.length === 0) break;
+      }
+    }
+
+    const boardNow = board.list({ teamId: options.teamId, limit: 1_000 });
+    const waiting = boardNow.filter(
+      (task) =>
+        (task.status === "backlog" || task.status === "claimed") &&
+        !results.has(task.boardTaskId),
+    ).length;
+
+    // A task the lead returned is in the backlog, not waiting for a review.
+    // This happens only when the run stops between rounds (cost cap, abort).
+    const list = [...results.values()].map((task) => {
+      const now = boardNow.find((row) => row.boardTaskId === task.boardTaskId);
+      if (now && (now.status === "backlog" || now.status === "claimed") && task.status === "review") {
+        return {
+          ...task,
+          status: "skipped" as const,
+          boardStatus: now.status,
+          reason: "returned for rework; the run stopped before the next round",
+        };
+      }
+      return task;
     });
 
-    const waiting = board
-      .list({ teamId: options.teamId, limit: 1_000 })
-      .filter((task) => task.status === "backlog" || task.status === "claimed").length;
-
-    const summary: TeamRunResult = {
+    return {
       runId: options.runId,
-      tasks: results,
-      merged: results.filter((task) => task.status === "merged").length,
-      review: results.filter((task) => task.status === "review").length,
-      blocked: results.filter((task) => task.status === "blocked").length,
-      errors: results.filter((task) => task.status === "error").length,
-      skipped: results.filter((task) => task.status === "skipped").length,
+      tasks: list,
+      merged: list.filter((task) => task.status === "merged").length,
+      review: list.filter((task) => task.status === "review").length,
+      blocked: list.filter((task) => task.status === "blocked").length,
+      errors: list.filter((task) => task.status === "error").length,
+      skipped: list.filter((task) => task.status === "skipped").length,
       waiting,
-      cost: results.reduce((total, task) => total + (task.cost ?? 0), 0),
+      rounds,
+      cost: costNow(),
+      leadCost,
+      costCapped,
     };
-    return summary;
   } finally {
     if (!options.keepWorktrees) sweepWorktrees(projectDir);
+    if (leadDir !== undefined) fs.rmSync(leadDir, { recursive: true, force: true });
     release();
   }
 }

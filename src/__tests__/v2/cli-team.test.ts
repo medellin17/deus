@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { teamRunFlags } from "../../v2/cli.ts";
 import { teamExitCode, type TeamRunResult } from "../../v2/team.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -58,6 +59,9 @@ function summary(overrides: Partial<TeamRunResult>): TeamRunResult {
     errors: 0,
     skipped: 0,
     waiting: 0,
+    rounds: 0,
+    leadCost: 0,
+    costCapped: false,
     cost: 0,
     ...overrides,
   };
@@ -91,6 +95,44 @@ void describe("teamExitCode", () => {
 
   void it("returns 1 when the runner itself failed", () => {
     assert.equal(teamExitCode(summary({ errors: 1, review: 1 })), 1);
+  });
+});
+
+void describe("teamRunFlags", () => {
+  const base = {
+    teamAutoLead: true,
+    teamMaxRounds: 4,
+    maxCostExplicit: false,
+    maxCost: undefined,
+    teamParallel: 2,
+    teamMaxAttempts: 5,
+    teamKeepWorktrees: true,
+    teamTasks: "bt-1, bt-2",
+    agent: "fixer",
+    boardActor: "lead",
+  };
+
+  void it("passes the auto-lead flags to the runner instead of dropping them", () => {
+    assert.deepEqual(teamRunFlags(base, { maxCost: 1.5 }), {
+      autoLead: true,
+      maxRounds: 4,
+      maxCost: 1.5,
+      maxParallel: 2,
+      maxAttempts: 5,
+      keepWorktrees: true,
+      taskIds: ["bt-1", "bt-2"],
+      agent: "fixer",
+      actor: "lead",
+    });
+  });
+
+  void it("lets an explicit --max-cost win over deus.json", () => {
+    const flags = teamRunFlags({ ...base, maxCostExplicit: true, maxCost: 0.25 }, { maxCost: 9 });
+    assert.equal(flags.maxCost, 0.25);
+  });
+
+  void it("leaves the task list undefined when the flag is absent", () => {
+    assert.equal(teamRunFlags({ ...base, teamTasks: undefined }, {}).taskIds, undefined);
   });
 });
 
@@ -142,6 +184,36 @@ void describe("team-run CLI guards", () => {
     const result = cli(["--team-run", "--team-name", "coding", "--team-tasks", " , ", "--cwd", dir]);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /--team-tasks must list at least one board task id/);
+  });
+
+  void it("validates the auto-lead flags", () => {
+    const dir = tempDir();
+    assert.match(
+      cli(["--team-auto-lead", "--cwd", dir]).stderr,
+      /--team-auto-lead is only valid with --team-run/,
+    );
+    assert.match(
+      cli(["--team-run", "--team-name", "coding", "--team-max-rounds", "0", "--cwd", dir]).stderr,
+      /--team-max-rounds must be an integer between 1 and 9/,
+    );
+    assert.match(
+      cli(["--team-run", "--team-name", "coding", "--team-max-rounds", "10", "--cwd", dir]).stderr,
+      /--team-max-rounds must be an integer between 1 and 9/,
+    );
+    assert.match(
+      cli(["--team-run", "--team-name", "coding", "--team-max-rounds", "3", "--cwd", dir]).stderr,
+      /--team-max-rounds requires --team-auto-lead/,
+    );
+  });
+
+  void it("accepts --max-cost for a team run instead of rejecting it", () => {
+    const dir = makeRepo();
+    // No team exists, so the run must fail on the team lookup: reaching that
+    // error proves the flag itself was accepted.
+    const result = cli(["--team-run", "--team-name", "ghost", "--max-cost", "1", "--cwd", dir]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /error: not_found: team not found: ghost/);
+    assert.doesNotMatch(result.stderr, /cannot be combined/);
   });
 
   void it("reports an unknown team with a code", () => {

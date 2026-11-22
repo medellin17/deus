@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,7 +38,7 @@ import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 const DEFAULT_MODEL = "opencode-go/hy4-flash-free#high";
 const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
 
-interface CliOptions {
+export interface CliOptions {
   pipeline: string;
   pipelineExplicit: boolean;
   cwd: string;
@@ -90,6 +91,8 @@ interface CliOptions {
   teamRun: boolean;
   teamParallel?: number;
   teamMaxAttempts?: number;
+  teamAutoLead: boolean;
+  teamMaxRounds?: number;
   teamTasks?: string;
   teamKeepWorktrees: boolean;
   direct: boolean;
@@ -128,6 +131,8 @@ Options:
   --team-parallel <n>  Agents at once for --team-run (default: 3, max 8)
   --team-tasks <ids>   Comma-separated board task ids for --team-run
   --team-max-attempts <n> Attempts before a task is blocked (default: 3)
+  --team-auto-lead     Let a tool-less advisor return failed tasks with a note
+  --team-max-rounds <n> Pools per auto-lead run, 1..9 (default: --team-max-attempts)
   --team-keep-worktrees Keep worktrees and branches after a successful merge
   --board-task <act>   Board mutation: add|claim|start|submit|accept|rework|retry|block|cancel
   --board-id <id>      Task id for --board-task
@@ -146,7 +151,8 @@ Options:
   --wake-coalesce-ms <ms> Coalesce events per recipient (0 disables, default: 30000)
   --model <ref>        provider/model#variant (default: ${DEFAULT_MODEL})
   --timeout <seconds>  Per-step timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
-  --max-cost <usd>     Abort after the total cost exceeds this value
+  --max-cost <usd>     Abort after the total cost exceeds this value (a team
+                       run stops between rounds and before the next task)
   --policy <file>      JSON permission policy
   --no-worktree        Run in the project directory instead of a git worktree
   --worktree           Force a git worktree even if deus.json disables it
@@ -188,6 +194,7 @@ function parseArgs(argv: string[]): CliOptions {
     boardActor: "main",
     teamRun: false,
     teamKeepWorktrees: false,
+    teamAutoLead: false,
     direct: false,
     planOnly: false,
     task: "",
@@ -353,6 +360,19 @@ function parseArgs(argv: string[]): CliOptions {
           throw new CliInputError("--team-max-attempts must be a positive integer");
         }
         break;
+      case "--team-auto-lead":
+        options.teamAutoLead = true;
+        break;
+      case "--team-max-rounds":
+        options.teamMaxRounds = Number(next());
+        if (
+          !Number.isInteger(options.teamMaxRounds) ||
+          options.teamMaxRounds < 1 ||
+          options.teamMaxRounds > 9
+        ) {
+          throw new CliInputError("--team-max-rounds must be an integer between 1 and 9");
+        }
+        break;
       case "--team-keep-worktrees":
         options.teamKeepWorktrees = true;
         break;
@@ -451,7 +471,6 @@ function parseArgs(argv: string[]): CliOptions {
       [options.task.length > 0, "a positional task"],
       [!options.gate, "--no-gate"],
       [options.mergeExplicit, "--merge/--no-merge"],
-      [options.maxCostExplicit, "--max-cost"],
       [options.worktreeExplicit, "--worktree/--no-worktree"],
       [options.baselineExplicit, "--baseline/--no-baseline"],
       [options.pipelineExplicit, "--pipeline"],
@@ -471,11 +490,16 @@ function parseArgs(argv: string[]): CliOptions {
     if (options.teamParallel !== undefined && options.teamParallel > 8) {
       throw new CliInputError("--team-parallel must not exceed 8");
     }
+    if (options.teamMaxRounds !== undefined && !options.teamAutoLead) {
+      throw new CliInputError("--team-max-rounds requires --team-auto-lead");
+    }
   }
   if (!options.teamRun) {
     const strays: Array<[boolean, string]> = [
       [options.teamTasks !== undefined, "--team-tasks"],
       [options.teamMaxAttempts !== undefined, "--team-max-attempts"],
+      [options.teamAutoLead, "--team-auto-lead"],
+      [options.teamMaxRounds !== undefined, "--team-max-rounds"],
       [options.teamParallel !== undefined, "--team-parallel"],
       [options.teamKeepWorktrees, "--team-keep-worktrees"],
     ];
@@ -1099,6 +1123,59 @@ function runBoardTask(projectDir: string, options: CliOptions): number {
 }
 
 
+export interface TeamRunFlags {
+  autoLead: boolean;
+  maxRounds?: number;
+  maxCost?: number;
+  maxParallel?: number;
+  maxAttempts?: number;
+  keepWorktrees: boolean;
+  taskIds?: string[];
+  agent: string;
+  actor?: string;
+}
+
+/**
+ * Maps CLI flags (and the `maxCost` default from deus.json) to runner options.
+ * Exported so a test can prove the flags are wired instead of accepted and
+ * dropped.
+ */
+type TeamFlagInput = Pick<
+  CliOptions,
+  | "teamAutoLead"
+  | "teamMaxRounds"
+  | "maxCostExplicit"
+  | "maxCost"
+  | "teamParallel"
+  | "teamMaxAttempts"
+  | "teamKeepWorktrees"
+  | "teamTasks"
+  | "agent"
+  | "boardActor"
+>;
+
+export function teamRunFlags(options: TeamFlagInput, config: DeusConfig): TeamRunFlags {
+  return {
+    autoLead: options.teamAutoLead,
+    maxRounds: options.teamMaxRounds,
+    maxCost: options.maxCostExplicit ? options.maxCost : config.maxCost,
+    maxParallel: options.teamParallel,
+    maxAttempts: options.teamMaxAttempts,
+    keepWorktrees: options.teamKeepWorktrees,
+    taskIds: options.teamTasks
+      ?.split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0),
+    agent: options.agent ?? "build",
+    actor: options.boardActor,
+  };
+}
+
+/** Model output must not be able to forge the line-based summary. */
+function oneLine(text: string): string {
+  return text.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u001b]/g, "").trim();
+}
+
 async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number> {
   const projectDir = path.resolve(options.cwd);
   const teamName = options.teamName as string;
@@ -1125,18 +1202,10 @@ async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number
       runId,
       model: options.model,
       checks,
-      actor: options.boardActor,
-      agent: options.agent ?? "build",
-      maxParallel: options.teamParallel,
-      maxAttempts: options.teamMaxAttempts,
       timeoutMs: options.timeoutSeconds * 1_000,
-      keepWorktrees: options.teamKeepWorktrees,
-      taskIds: options.teamTasks
-        ?.split(",")
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0),
       signal,
       onProgress: (line) => log(`team: ${line}`),
+      ...teamRunFlags(options, config),
     });
 
     for (const task of result.tasks) {
@@ -1147,7 +1216,8 @@ async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number
         task.branch ? `branch: ${task.branch}` : undefined,
         task.commit ? `commit: ${task.commit}` : undefined,
         task.gate ? `gate: ${task.gate.status}` : undefined,
-        task.reason ? `reason: ${task.reason}` : undefined,
+        task.reason ? `reason: ${oneLine(task.reason)}` : undefined,
+        task.lead ? `lead: ${task.lead.decision} (${oneLine(task.lead.reason)})` : undefined,
         task.cost !== undefined ? `cost=~$${task.cost.toFixed(4)}` : undefined,
       ].filter(Boolean);
       console.log(details.join(" "));
@@ -1155,7 +1225,9 @@ async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number
     console.log(
       `team: merged=${result.merged} review=${result.review} blocked=${result.blocked} ` +
         `errors=${result.errors} skipped=${result.skipped} waiting=${result.waiting} ` +
-        `cost=~$${result.cost.toFixed(4)} run=${result.runId}`,
+        `rounds=${result.rounds} cost=~$${result.cost.toFixed(4)} ` +
+        `lead=~$${result.leadCost.toFixed(4)}` +
+        `${result.costCapped ? " stopped-by-cost" : ""} run=${result.runId}`,
     );
 
     return teamExitCode(result);
@@ -1452,9 +1524,22 @@ async function main(): Promise<void> {
   process.exitCode = result.state.status === "succeeded" ? (mergePending ? 2 : 0) : 1;
 }
 
-main().catch((error: unknown) => {
-  const code = (error as { code?: unknown }).code;
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(typeof code === "string" ? `error: ${code}: ${message}` : `error: ${message}`);
-  process.exitCode = 1;
-});
+/** True when this module is the program, not an import from a test. */
+function isEntryPoint(): boolean {
+  const script = process.argv[1];
+  if (!script) return false;
+  try {
+    return fs.realpathSync(script) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  main().catch((error: unknown) => {
+    const code = (error as { code?: unknown }).code;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(typeof code === "string" ? `error: ${code}: ${message}` : `error: ${message}`);
+    process.exitCode = 1;
+  });
+}
