@@ -5,7 +5,9 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 
 import type { OpenCodeClient } from "./client.ts";
-import { followUp, resolveTaskSession, type SessionAddress } from "./sessions.ts";
+import { estimateCost } from "./pricing.ts";
+import type { TokenUsage } from "./types.ts";
+import { followUp, type SessionAddress } from "./sessions.ts";
 import { openStore, openStoreReadonly } from "./store.ts";
 
 export const DEFAULT_DEADLINE_SECONDS = 3_600;
@@ -83,7 +85,12 @@ export interface WakeQueue {
   readonly projectDir: string;
   enqueue(input: EnqueueInput): WakeEvent;
   claim(options?: ClaimOptions): Claim | null;
-  complete(eventIds: string[], claimToken: string, costBaseline?: number): void;
+  complete(
+    eventIds: string[],
+    claimToken: string,
+    costBaseline?: number,
+    tokensBaseline?: TokenUsage,
+  ): void;
   fail(eventIds: string[], claimToken: string, error: string): void;
   /** Releases the claim and retries later without spending an attempt. */
   defer(eventIds: string[], claimToken: string, reason: string, delayMs?: number): void;
@@ -116,6 +123,7 @@ interface WakeRow {
   deadline_at: string;
   batch_id: string | null;
   cost_baseline: number | null;
+  tokens_baseline_json: string | null;
   cost: number | null;
   last_error: string | null;
   outcome: string | null;
@@ -203,6 +211,53 @@ function toEvent(row: WakeRow): WakeEvent {
   };
 }
 
+function toTokens(tokens: {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
+}): TokenUsage {
+  return {
+    input: tokens.input,
+    output: tokens.output,
+    reasoning: tokens.reasoning,
+    cache: { read: tokens.cache.read, write: tokens.cache.write },
+  };
+}
+
+function tokenTotal(tokens: TokenUsage | undefined): number {
+  if (!tokens) return 0;
+  return tokens.input + tokens.output + tokens.reasoning;
+}
+
+function deltaTokens(
+  after: TokenUsage | undefined,
+  before: TokenUsage | undefined,
+): TokenUsage | undefined {
+  if (!after) return undefined;
+  const base = before ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const clamp = (value: number): number => Math.max(0, value);
+  return {
+    input: clamp(after.input - base.input),
+    output: clamp(after.output - base.output),
+    reasoning: clamp(after.reasoning - base.reasoning),
+    cache: {
+      read: clamp(after.cache.read - base.cache.read),
+      write: clamp(after.cache.write - base.cache.write),
+    },
+  };
+}
+
+function modelRef(model: { providerID: string; id: string; variant?: string } | undefined): string | undefined {
+  if (!model) return undefined;
+  return `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+}
+
+interface BaselineSnapshot {
+  cost: number;
+  tokens?: TokenUsage;
+}
+
 function backoffMs(attempts: number): number {
   return BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1);
 }
@@ -260,9 +315,6 @@ export interface TransitionWakeInput {
   taskId: string;
   attempt: number;
   eventType: WakeEventType;
-  executionRef?: string;
-  /** A review result belongs to the session that produced it; a block belongs to the lead. */
-  preferTaskSession: boolean;
   title: string;
   status: string;
   payload?: Record<string, unknown>;
@@ -273,6 +325,9 @@ export interface TransitionWakeInput {
  * Writes an outbox row inside the caller's transaction. Called from the board
  * right after the status change, so a crash cannot leave one without the other.
  *
+ * The recipient is the team lead: a review-ready task has to reach the one who
+ * decides, not the session that just reported it.
+ *
  * Must be idempotent: the same attempt of the same task yields one row.
  */
 export function enqueueTransitionWake(
@@ -280,17 +335,8 @@ export function enqueueTransitionWake(
   projectDir: string,
   input: TransitionWakeInput,
 ): void {
-  const taskAddress =
-    input.preferTaskSession && input.executionRef
-      ? resolveTaskSession(projectDir, input.executionRef)
-      : undefined;
-  const recipient = taskAddress ?? readLeadSession(projectDir);
-
-  let note: string | null = null;
-  if (!recipient) note = "no recipient session";
-  else if (input.preferTaskSession && input.executionRef && !taskAddress) {
-    note = "task session unresolved, using lead";
-  }
+  const recipient = readLeadSession(projectDir);
+  const note = recipient ? null : "no recipient session";
 
   const now = nowIso();
   const deadline = new Date(
@@ -462,7 +508,12 @@ class SqliteWake implements WakeQueue {
     });
   }
 
-  complete(eventIds: string[], claimToken: string, costBaseline?: number): void {
+  complete(
+    eventIds: string[],
+    claimToken: string,
+    costBaseline?: number,
+    tokensBaseline?: TokenUsage,
+  ): void {
     this.write(() => {
       const now = nowIso();
       // One batch id per message: the cost of a coalesced message is counted
@@ -473,10 +524,18 @@ class SqliteWake implements WakeQueue {
           .prepare(
             `UPDATE wake_events
                 SET status = 'delivered', delivered_at = ?, claim_token = NULL,
-                    lease_until = NULL, batch_id = ?, cost_baseline = ?, last_error = NULL
+                    lease_until = NULL, batch_id = ?, cost_baseline = ?,
+                    tokens_baseline_json = ?, last_error = NULL
               WHERE wake_event_id = ? AND claim_token = ?`,
           )
-          .run(now, batchId, costBaseline ?? null, eventId, claimToken);
+          .run(
+            now,
+            batchId,
+            costBaseline ?? null,
+            tokensBaseline ? JSON.stringify(tokensBaseline) : null,
+            eventId,
+            claimToken,
+          );
         if (updated.changes !== 1) {
           throw new Error(`wake: claim token does not own ${eventId}`);
         }
@@ -601,6 +660,7 @@ class SqliteWake implements WakeQueue {
         `SELECT COALESCE(w.batch_id, w.wake_event_id) AS grp,
                 MIN(w.wake_event_id) AS first_id,
                 MIN(w.cost_baseline) AS baseline,
+                MIN(w.tokens_baseline_json) AS tokens_baseline,
                 MIN(w.recipient_json) AS recipient
            FROM wake_events w
           WHERE w.status = 'delivered' AND w.cost IS NULL AND w.cost_baseline IS NOT NULL${scope}
@@ -616,6 +676,7 @@ class SqliteWake implements WakeQueue {
       grp: string;
       first_id: string;
       baseline: number;
+      tokens_baseline: string | null;
       recipient: string;
     }>;
 
@@ -626,10 +687,23 @@ class SqliteWake implements WakeQueue {
 
       try {
         const info = await client.session.get({ sessionID });
-        const delta = Math.max(0, (info.cost ?? 0) - group.baseline);
-        // A zero delta means the turn has not spent anything yet (the message is
-        // still queued). Leave the cost unknown so a later pass can see the real
-        // spend instead of freezing it at zero.
+        let delta = Math.max(0, (info.cost ?? 0) - group.baseline);
+
+        if (delta <= 0) {
+          // Some providers report cost 0 even for a paid model. Token growth is
+          // still real, so price the delta with the session's own model.
+          const before = group.tokens_baseline
+            ? (JSON.parse(group.tokens_baseline) as TokenUsage)
+            : undefined;
+          const grown = deltaTokens(info.tokens ? toTokens(info.tokens) : undefined, before);
+          const model = modelRef(info.model);
+          if (model && tokenTotal(grown) > 0 && grown) {
+            delta = estimateCost(model, grown);
+          }
+        }
+
+        // Nothing spent yet (the message may still be queued): leave the cost
+        // unknown so a later pass can see the real spend instead of freezing 0.
         if (delta <= 0) continue;
 
         const updated = this.db
@@ -774,10 +848,16 @@ function renderWake(events: WakeEvent[]): string {
   return lines.join("\n");
 }
 
-async function sessionCost(client: OpenCodeClient, sessionID: string): Promise<number | undefined> {
+async function sessionBaseline(
+  client: OpenCodeClient,
+  sessionID: string,
+): Promise<BaselineSnapshot | undefined> {
   try {
     const info = await client.session.get({ sessionID });
-    return info.cost ?? 0;
+    return {
+      cost: info.cost ?? 0,
+      tokens: info.tokens ? toTokens(info.tokens) : undefined,
+    };
   } catch {
     return undefined;
   }
@@ -896,7 +976,7 @@ export async function runWave(
       address = lead;
     }
 
-    const baseline = await sessionCost(client, address.sessionID);
+    const baseline = await sessionBaseline(client, address.sessionID);
     let delivered = false;
     let error: string | undefined;
 
@@ -920,7 +1000,7 @@ export async function runWave(
       // it, but do not claim ownership of events we no longer hold.
       result.messages += 1;
       try {
-        queue.complete(ids, claim.claimToken, baseline);
+        queue.complete(ids, claim.claimToken, baseline?.cost, baseline?.tokens);
         result.delivered += ids.length;
         deliveredIds.push(...ids);
       } catch {

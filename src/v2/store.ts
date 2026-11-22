@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS wake_events (
     deadline_at     TEXT NOT NULL,
     batch_id        TEXT,
     cost_baseline   REAL,
+    tokens_baseline_json TEXT,
     cost            REAL,
     last_error      TEXT,
     outcome         TEXT,
@@ -109,8 +110,13 @@ CREATE INDEX IF NOT EXISTS idx_wake_pending ON wake_events(status, available_at)
 function ensureWakeColumns(db: Database.Database): void {
   const columns = db.prepare(`PRAGMA table_info(wake_events)`).all() as Array<{ name: string }>;
   if (columns.length === 0) return;
-  if (!columns.some((column) => column.name === "batch_id")) {
+
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("batch_id")) {
     db.exec(`ALTER TABLE wake_events ADD COLUMN batch_id TEXT`);
+  }
+  if (!names.has("tokens_baseline_json")) {
+    db.exec(`ALTER TABLE wake_events ADD COLUMN tokens_baseline_json TEXT`);
   }
 }
 

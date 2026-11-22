@@ -67,6 +67,8 @@ interface FakeOptions {
   cost?: number;
   /** Cost per `session.get` call; the last value repeats. */
   costSeq?: number[];
+  /** Input tokens per `session.get` call; the last value repeats. */
+  tokenSeq?: number[];
 }
 
 function fakeClient(options: FakeOptions = {}) {
@@ -80,9 +82,13 @@ function fakeClient(options: FakeOptions = {}) {
         const value = options.costSeq
           ? options.costSeq[Math.min(calls.get - 1, options.costSeq.length - 1)]
           : cost;
+        const tokenValue = options.tokenSeq
+          ? options.tokenSeq[Math.min(calls.get - 1, options.tokenSeq.length - 1)]
+          : 0;
         return {
           cost: value,
-          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          model: { providerID: "opencode-go", id: "deepseek-v4.1-flash", variant: "high" },
+          tokens: { input: tokenValue, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         };
       },
       prompt: async (input: { text: string }) => {
@@ -163,6 +169,27 @@ void describe("wake outbox", () => {
     assert.equal(pending.length, 1);
     assert.equal(pending[0].eventType, "task/review-ready");
     assert.equal(pending[0].boardTaskId, taskId);
+  });
+
+  void it("sends review-ready to the lead even when the task has a session", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const runDir = path.join(dir, ".deus", "runs", "run-abc123");
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir, "run.json"),
+      JSON.stringify({
+        version: 1,
+        steps: [{ stepId: "fix", sessionID: "ses-worker", agent: "build" }],
+      }),
+      "utf-8",
+    );
+
+    submitTask(board, dir, "run-abc123/fix");
+
+    const [event] = newWake(dir).list({ limit: 1 });
+    // Review is the lead's job; the worker session is for a rework message.
+    assert.equal(event.recipient.sessionID, "ses-lead");
   });
 
   void it("rolls back both the status and the event when the outbox write fails", () => {
@@ -736,6 +763,26 @@ void describe("runWave", () => {
 
     assert.equal(reconciled, 1);
     assert.ok(Math.abs(queue.stats().knownCost - 0.15) < 1e-9);
+  });
+
+  void it("estimates cost from tokens when the provider reports zero", async () => {
+    const { dir } = newBoard();
+    const queue = newWake(dir);
+    queue.enqueue({
+      dedupKey: "one",
+      teamId: "t",
+      eventType: "task/review-ready",
+      recipient: { sessionID: "ses-1" },
+    });
+
+    // A paid model that reports cost 0 but grows by 1M input tokens.
+    const { client } = fakeClient({
+      costSeq: [0, 0, 0, 0],
+      tokenSeq: [0, 0, 1_000_000, 1_000_000],
+    });
+    await runWave(client, queue, { maxSteps: 1, coalesceMs: 0 });
+
+    assert.ok(Math.abs(queue.stats().knownCost - 0.15) < 1e-9, `cost=${queue.stats().knownCost}`);
   });
 
   void it("reports a dry run without sending anything", async () => {
