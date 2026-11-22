@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { loadAgents } from "./agents.ts";
 import { applyRun } from "./apply.ts";
+import { BoardError, openBoard, type Board } from "./board.ts";
 import { createOpenCodeClient } from "./client.ts";
 import { loadConfig, resolveChecks, type DeusConfig } from "./config.ts";
 import { SessionExecutor } from "./executor.ts";
@@ -48,6 +49,7 @@ interface CliOptions {
   cleanup: boolean;
   json: boolean;
   smoke: boolean;
+  board: boolean;
   direct: boolean;
   agent?: string;
   planOnly: boolean;
@@ -61,6 +63,7 @@ function printHelp(): void {
 Usage:
   node --import tsx src/v2/cli.ts [options] "task"
   node --import tsx src/v2/cli.ts --smoke
+  node --import tsx src/v2/cli.ts --board --cwd <project>
   node --import tsx src/v2/cli.ts --plan-only "task"
   node --import tsx src/v2/cli.ts --from-plan plan.json "task"
   node --import tsx src/v2/cli.ts --resume <runId> --cwd <project>
@@ -73,6 +76,7 @@ Options:
   --resume <runId>     Resume a checkpointed run
   --plan-only          Ask the planner for a plan and exit
   --from-plan <file>   Run a plan produced by --plan-only
+  --board              Print the task board and exit (read-only)
   --model <ref>        provider/model#variant (default: ${DEFAULT_MODEL})
   --timeout <seconds>  Per-step timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
   --max-cost <usd>     Abort after the total cost exceeds this value
@@ -111,6 +115,7 @@ function parseArgs(argv: string[]): CliOptions {
     cleanup: false,
     json: false,
     smoke: false,
+    board: false,
     direct: false,
     planOnly: false,
     task: "",
@@ -197,6 +202,9 @@ function parseArgs(argv: string[]): CliOptions {
         break;
       case "--smoke":
         options.smoke = true;
+        break;
+      case "--board":
+        options.board = true;
         break;
       case "--direct":
         options.direct = true;
@@ -503,6 +511,50 @@ async function runPlanOnly(
   return 0;
 }
 
+function showBoard(projectDir: string): number {
+  let board: Board;
+  try {
+    board = openBoard(projectDir, { readonly: true });
+  } catch (error) {
+    if (error instanceof BoardError && error.code === "not_found") {
+      console.log("board: not created yet");
+      return 0;
+    }
+    throw error;
+  }
+
+  try {
+    for (const team of board.listTeams()) {
+      console.log(`team ${team.name} (${team.teamId}) — ${team.status}`);
+      const tasks = board.list({ teamId: team.teamId });
+      if (tasks.length === 0) {
+        console.log("  (no tasks)");
+        continue;
+      }
+      for (const task of tasks) {
+        const assignee = task.assignee ? ` @${task.assignee}` : "";
+        console.log(
+          `  [${task.status}] ${task.boardTaskId} ${task.title}${assignee} (attempt ${task.attempt})`,
+        );
+      }
+    }
+
+    const events = board.events({ limit: 20, order: "desc" }).reverse();
+    if (events.length > 0) {
+      console.log("");
+      console.log("recent events:");
+      for (const event of events) {
+        console.log(
+          `  ${event.createdAt} ${event.type} ${event.boardTaskId ?? "-"} (${event.actor})`,
+        );
+      }
+    }
+    return 0;
+  } finally {
+    board.close();
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -519,6 +571,11 @@ async function main(): Promise<void> {
 
   if (options.smoke) {
     process.exitCode = await runSmoke(options, controller.signal);
+    return;
+  }
+
+  if (options.board) {
+    process.exitCode = showBoard(path.resolve(options.cwd));
     return;
   }
 
