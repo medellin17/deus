@@ -1,5 +1,5 @@
 {
-  "model": "tokenharbor/deepseek-v4.1-flash:free",
+  "model": "opencode-go/hy4-flash-free#high",
   "maxCost": 0.2,
   "checks": {
     "test": "npm test",

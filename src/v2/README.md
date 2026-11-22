@@ -35,7 +35,7 @@ npm run v2 -- --cwd /path/to/project --pipeline build "Добавь multiply(a, 
 
 ```json
 {
-  "model": "tokenharbor/deepseek-v4.1-flash:free",
+  "model": "opencode-go/hy4-flash-free#high",
   "timeoutSeconds": 900,
   "maxCost": 0.2,
   "pipeline": "build",
@@ -343,12 +343,12 @@ gated-шага сохраняются отдельными файлами `*-att
 По умолчанию:
 
 ```
-tokenharbor/deepseek-v4.1-flash:free
+opencode-go/hy4-flash-free#high
 ```
 
-Бесплатный вариант, стоимость $0. Переопределить:
-`--model tokenharbor/deepseek-v4.1-flash#high` (платный) или
-`--model opencode-go/deepseek-v4.1-flash#max`.
+Бесплатный вариант Hy4 Flash от OpenCode Go, стоимость $0. Переопределить:
+`--model opencode-go/deepseek-v4.1-flash#high` (платный) или
+`--model tokenharbor/deepseek-v4.1-flash#high`.
 
 Провайдер не всегда отдаёт стоимость сессии, поэтому при нулевой стоимости раннер
 считает её по токенам и таблице цен (`src/v2/pricing.ts`). Это оценка, а не биллинг.

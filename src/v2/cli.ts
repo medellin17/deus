@@ -22,7 +22,7 @@ import { getPipeline } from "./pipelines.ts";
 import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 
-const DEFAULT_MODEL = "tokenharbor/deepseek-v4.1-flash:free";
+const DEFAULT_MODEL = "opencode-go/hy4-flash-free#high";
 const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
 
 interface CliOptions {
