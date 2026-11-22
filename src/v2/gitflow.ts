@@ -388,9 +388,18 @@ export function createBranch(workDir: string, branch: string): boolean {
   return git(workDir, ["switch", "-c", branch]).status === 0;
 }
 
-/** Undoes the merge commit that was just created, under the merge lock. */
-export function resetHard(cwd: string, ref: string): boolean {
-  return git(cwd, ["reset", "--hard", ref]).status === 0;
+/**
+ * Undoes the merge commit under the merge lock. `--keep` refuses to overwrite
+ * local changes, so a human editing the project during a long post-gate keeps
+ * their work: the rollback simply does not happen and the caller reports it.
+ */
+export function resetKeeping(cwd: string, ref: string): boolean {
+  return git(cwd, ["reset", "--keep", ref]).status === 0;
+}
+
+/** True when `ancestor` is reachable from `descendant`. */
+export function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
+  return git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]).status === 0;
 }
 
 /** Deletes a fully merged branch. Refuses when git considers it unmerged. */
@@ -418,4 +427,16 @@ export function branchDiff(
   const text = (diff.stdout ?? "").trim();
   if (text.length === 0) return undefined;
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (обрезано)` : text;
+}
+
+/** True when HEAD is exactly this commit (short or full hash). */
+export function headIs(cwd: string, commit: string): boolean {
+  const head = revParse(cwd, "HEAD");
+  const target = revParse(cwd, commit);
+  return head !== undefined && target !== undefined && head === target;
+}
+
+/** Branch names matching a git pattern, e.g. `deus/t-bt-1-*`. */
+export function branchesMatching(cwd: string, pattern: string): string[] {
+  return listFiles(cwd, ["branch", "--list", pattern, "--format=%(refname:short)"]);
 }

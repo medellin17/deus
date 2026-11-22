@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 
 import { BoardError, openBoard, type Board } from "../../v2/board.ts";
 import type { OpenCodeClient } from "../../v2/client.ts";
+import { RunBusyError } from "../../v2/lock.ts";
 import { runCodingTeam, selectReadyTasks, teamExitCode, TeamError } from "../../v2/team.ts";
 import type { LeadAdvisor, LeadDecision, LeadEvidence } from "../../v2/lead.ts";
 import type { Executor, ExecutorInput, StepExecution } from "../../v2/types.ts";
@@ -874,6 +875,323 @@ void describe("runCodingTeam", () => {
     assert.equal(result.errors, 1);
   });
 
+  void it("leaves worktrees of other runs alone", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "own tree");
+    const foreign = path.join(repo, ".deus", "worktrees", "run-other");
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(foreign, "notes.txt"), "someone else\n", "utf-8");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "mine.txt"), "x\n", "utf-8"),
+    });
+
+    const result = await runCodingTeam(
+      {} as OpenCodeClient,
+      board,
+      teamOptions(repo, teamId, "run-own", executor),
+    );
+
+    assert.equal(result.merged, 1);
+    assert.ok(fs.existsSync(foreign), "a foreign worktree must survive the sweep");
+  });
+
+  void it("keeps a tree across runs when asked", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "keep me");
+    const { executor, calls } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "kept.txt"), "x\n", "utf-8"),
+    });
+
+    const first = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-keep1", executor),
+      keepWorktrees: true,
+    });
+    const kept = first.tasks[0].workDir;
+    assert.ok(kept && fs.existsSync(kept));
+
+    addTask(board, teamId, "second");
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-keep2", executor));
+
+    assert.ok(fs.existsSync(kept), "the kept tree must survive the next run");
+    assert.equal(calls.length, 2);
+  });
+
+  void it("does not roll the merge back when HEAD moved after it", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "moves head");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8"),
+    });
+
+    // Passes before the merge, then fails after it and moves the project HEAD,
+    // so the rollback would throw away a commit that is not ours.
+    const command =
+      `if git -C "${repo}" log -1 --format=%s | grep -q '^Merge deus'; then ` +
+      `git -C "${repo}" commit --allow-empty -qm moved-by-check; exit 1; fi; exit 0`;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-moved", executor),
+      checks: [{ name: "moved", command }],
+    });
+
+    assert.equal(result.blocked, 1, result.tasks[0]?.reason ?? "");
+    assert.match(result.tasks[0].reason ?? "", /HEAD moved after the merge/);
+    assert.equal(git(repo, "log", "-1", "--format=%s"), "moved-by-check");
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+  });
+
+  void it("recovers a task left running by a dead run", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "orphan");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, `run-dead/${taskId}`);
+    // A lock whose owner is dead is the evidence that a run died here.
+    const child = spawnSync(process.execPath, ["-e", ""]);
+    fs.writeFileSync(
+      path.join(repo, ".deus", "run.lock"),
+      `${JSON.stringify({ pid: child.pid, runId: "run-dead", kind: "team" })}\n`,
+      "utf-8",
+    );
+    const { executor, calls } = fakeExecutor({ run: () => undefined });
+
+    const result = await runCodingTeam(
+      {} as OpenCodeClient,
+      board,
+      teamOptions(repo, teamId, "run-recover", executor),
+    );
+
+    assert.equal(calls.length, 0, "a dead run must not be continued blindly");
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+    const reason = board.getTask(taskId)?.blockedReason ?? "";
+    assert.match(reason, /previous run run-dead did not finish/);
+    assert.match(reason, /git log --grep run-dead/);
+    assert.equal(fs.existsSync(path.join(repo, ".deus", "crashed-run.json")), false);
+    assert.equal(result.blocked, 1);
+    assert.equal(result.tasks.length, 1);
+    assert.equal(teamExitCode(result), 2);
+  });
+
+  void it("does not touch a task a human started by hand", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "manual");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, "run-manual/step");
+    // No lock: no run died, so `running` belongs to someone alive.
+    const { executor, calls } = fakeExecutor({ run: () => undefined });
+
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-manual", executor));
+
+    assert.equal(calls.length, 0);
+    assert.equal(board.getTask(taskId)?.status, "running");
+  });
+
+  void it("is blocked by a live pipeline lock", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const { executor } = fakeExecutor({ run: () => undefined });
+    fs.writeFileSync(
+      path.join(repo, ".deus", "run.lock"),
+      `${JSON.stringify({ pid: process.pid, runId: "run-pipe", kind: "pipeline" })}\n`,
+      "utf-8",
+    );
+
+    await assert.rejects(
+      runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-team", executor)),
+      (error: unknown) => error instanceof RunBusyError && /pipeline/.test(error.message),
+    );
+  });
+
+  void it("releases the lock after success and after an interrupt", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "one");
+    const { executor } = fakeExecutor({ run: () => undefined });
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-rel1", executor));
+    assert.equal(fs.existsSync(path.join(repo, ".deus", "run.lock")), false);
+
+    addTask(board, teamId, "two");
+    const controller = new AbortController();
+    controller.abort();
+    await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-rel2", executor),
+      signal: controller.signal,
+    });
+    assert.equal(fs.existsSync(path.join(repo, ".deus", "run.lock")), false);
+  });
+
+  void it("rolls the merge back without touching an unrelated local edit", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "dirty during post-gate");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8"),
+    });
+
+    // Fails the post-merge gate and edits a tracked file the merge did not
+    // touch: `reset --keep` rolls back and keeps the edit.
+    const command =
+      `if git -C "${repo}" log -1 --format=%s | grep -q '^Merge deus'; then ` +
+      `echo human-edit >> "${repo}/readme.md"; exit 1; fi; exit 0`;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-dirtyguard", executor),
+      checks: [{ name: "guard", command }],
+    });
+
+    assert.equal(result.blocked, 1, result.tasks[0]?.reason ?? "");
+    assert.match(result.tasks[0].reason ?? "", /merge rolled back/);
+    assert.match(fs.readFileSync(path.join(repo, "readme.md"), "utf-8"), /human-edit/);
+    assert.equal(fs.existsSync(path.join(repo, "a.txt")), false);
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+  });
+
+  void it("refuses the rollback when a local edit would be destroyed", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    addTask(board, teamId, "edited merge result");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8"),
+    });
+
+    // The human edits the very file the merge added; removing it would lose
+    // that edit, so --keep aborts and the task reports it.
+    const command =
+      `if git -C "${repo}" log -1 --format=%s | grep -q '^Merge deus'; then ` +
+      `echo human-edit >> "${repo}/a.txt"; exit 1; fi; exit 0`;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-keepguard", executor),
+      checks: [{ name: "guard", command }],
+    });
+
+    assert.equal(result.blocked, 1, result.tasks[0]?.reason ?? "");
+    assert.match(result.tasks[0].reason ?? "", /rollback failed/);
+    assert.match(fs.readFileSync(path.join(repo, "a.txt"), "utf-8"), /human-edit/);
+  });
+
+  void it("does not accept when HEAD no longer contains the merge", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "reset during post-gate");
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8"),
+    });
+
+    // Post-gate passes, but the project is rolled back before `accept`.
+    const command =
+      `if git -C "${repo}" log -1 --format=%s | grep -q '^Merge deus'; then ` +
+      `git -C "${repo}" reset --hard HEAD~1 >/dev/null; fi; exit 0`;
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-acceptguard", executor),
+      checks: [{ name: "guard", command }],
+    });
+
+    assert.equal(result.blocked, 1, result.tasks[0]?.reason ?? "");
+    assert.match(result.tasks[0].reason ?? "", /no longer contains the merge/);
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+    assert.equal(fs.existsSync(path.join(repo, "a.txt")), false);
+  });
+
+  void it("warns about runner debris when the lock was removed by hand", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "left behind");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, `run-dead/${taskId}`);
+    const progress: string[] = [];
+    const { executor } = fakeExecutor({ run: () => undefined });
+
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-warn", executor),
+      onProgress: (line) => progress.push(line),
+    });
+
+    // No stale lock: a run may not have died, so nothing is blocked.
+    assert.equal(board.getTask(taskId)?.status, "running");
+    assert.equal(result.tasks.length, 0);
+    assert.match(progress.join("\n"), /is still running from run-dead/);
+    assert.match(progress.join("\n"), /--board-task block --board-id/);
+  });
+
+  void it("leaves a hand-started task alone even after a stale lock", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "manual ref");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, "run-manual/step");
+    const child = spawnSync(process.execPath, ["-e", ""]);
+    fs.writeFileSync(
+      path.join(repo, ".deus", "run.lock"),
+      `${JSON.stringify({ pid: child.pid, runId: "run-dead", kind: "team" })}\n`,
+      "utf-8",
+    );
+    const { executor } = fakeExecutor({ run: () => undefined });
+
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-manual2", executor));
+
+    assert.equal(board.getTask(taskId)?.status, "running");
+  });
+
+  void it("recovers a task using a crash note left by another run", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "noted crash");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, `run-old/${taskId}`);
+    // No lock here: another run took the lock, found the crash and left a note.
+    fs.writeFileSync(
+      path.join(repo, ".deus", "crashed-run.json"),
+      `${JSON.stringify({ pid: 1, runId: "run-old", kind: "team" })}\n`,
+      "utf-8",
+    );
+    const { executor } = fakeExecutor({ run: () => undefined });
+
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-noted", executor));
+
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+    assert.match(board.getTask(taskId)?.blockedReason ?? "", /previous run run-old/);
+    assert.equal(fs.existsSync(path.join(repo, ".deus", "crashed-run.json")), false);
+  });
+
+  void it("recovers a stuck task of another team", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const other = board.createTeam({ name: "other", goal: "g", leadAgent: "otherlead" });
+    const taskId = board.createTask({
+      teamId: other.teamId,
+      title: "stuck elsewhere",
+      goal: "g",
+      actor: "lead",
+    }).boardTaskId;
+    const claim = board.claim(taskId, "otherlead");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, `run-other/${taskId}`);
+    fs.writeFileSync(
+      path.join(repo, ".deus", "crashed-run.json"),
+      `${JSON.stringify({ pid: 1, runId: "run-other", kind: "team" })}\n`,
+      "utf-8",
+    );
+    const { executor } = fakeExecutor({ run: () => undefined });
+
+    // A run of a different team notices it first: the note is project-wide.
+    await runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-cross", executor));
+
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+    assert.match(board.getTask(taskId)?.blockedReason ?? "", /previous run run-other/);
+    assert.equal(fs.existsSync(path.join(repo, ".deus", "crashed-run.json")), false);
+  });
+
   void it("refuses to start on a dirty project", async () => {
     const repo = makeRepo();
     const { board, teamId } = makeBoard(repo);
@@ -918,14 +1236,14 @@ void describe("runCodingTeam", () => {
     const { board, teamId } = makeBoard(repo);
     const { executor } = fakeExecutor({ run: () => undefined });
     fs.writeFileSync(
-      path.join(repo, ".deus", "team.lock"),
-      `${JSON.stringify({ pid: process.pid, runId: "run-other" })}\n`,
+      path.join(repo, ".deus", "run.lock"),
+      `${JSON.stringify({ pid: process.pid, runId: "run-other", kind: "team" })}\n`,
       "utf-8",
     );
 
     await assert.rejects(
       runCodingTeam({} as OpenCodeClient, board, teamOptions(repo, teamId, "run-locked", executor)),
-      (error: unknown) => error instanceof TeamError && error.code === "team_busy",
+      (error: unknown) => error instanceof RunBusyError && error.code === "run_busy",
     );
   });
 });

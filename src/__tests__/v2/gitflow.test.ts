@@ -8,6 +8,7 @@ import { after, describe, it } from "node:test";
 import {
   attemptMerge,
   branchExists,
+  headIs,
   commitWorktree,
   mergeBranch,
   pruneWorktrees,
@@ -361,6 +362,21 @@ void describe("attemptMerge", () => {
   });
 });
 
+void describe("headIs", () => {
+  void it("matches the current HEAD and rejects another commit", () => {
+    const repo = makeRepo();
+    const head = git(repo, "rev-parse", "HEAD");
+    const short = git(repo, "rev-parse", "--short", "HEAD");
+    git(repo, "commit", "--allow-empty", "-qm", "next");
+    const next = git(repo, "rev-parse", "HEAD");
+
+    assert.equal(headIs(repo, head), false, "HEAD moved past it");
+    assert.equal(headIs(repo, next), true);
+    assert.equal(headIs(repo, next.slice(0, 7)), true);
+    assert.equal(headIs(repo, short), false);
+  });
+});
+
 void describe("removeWorkdir", () => {
   void it("never deletes the project directory itself", () => {
     const repo = makeRepo();
@@ -369,6 +385,25 @@ void describe("removeWorkdir", () => {
 
     assert.ok(fs.existsSync(path.join(repo, "file.txt")));
     assert.ok(fs.existsSync(path.join(repo, ".git")));
+  });
+
+  void it("never deletes a directory outside .deus/worktrees", () => {
+    const repo = makeRepo();
+    const outside = path.join(repo, "precious");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "keep\n", "utf-8");
+
+    removeWorkdir(repo, outside);
+
+    assert.ok(fs.existsSync(path.join(outside, "keep.txt")));
+  });
+});
+
+void describe("prepareWorkdir id validation", () => {
+  void it("refuses an id that would leave the worktree directory", () => {
+    const repo = makeRepo();
+    assert.throws(() => prepareWorkdir(repo, "t-../../tmp/x", true), /invalid worktree id/);
+    assert.throws(() => prepareWorkdir(repo, "a/b", true), /invalid worktree id/);
   });
 });
 

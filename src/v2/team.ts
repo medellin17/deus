@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -9,11 +10,14 @@ import { applyBaseline, runGate } from "./gate.ts";
 import {
   branchDiff,
   branchExists,
+  branchesMatching,
+  headIs,
   commitWorktree,
   createBranch,
   deleteBranch,
   mergeBranch,
-  resetHard,
+  isAncestor,
+  resetKeeping,
   revParse,
   worktreeStatus,
 } from "./gitflow.ts";
@@ -24,6 +28,7 @@ import {
   type LeadAdvisor,
   type LeadDecision,
 } from "./lead.ts";
+import { acquireProjectLock, clearCrashMarker, readCrashMarker } from "./lock.ts";
 import { recordStepSession } from "./sessions.ts";
 import type { CheckCommand, Executor, GateResult } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
@@ -139,6 +144,8 @@ function sameNote(left: string, right: string): boolean {
 }
 
 const RUN_ID = /^run-[0-9A-Za-z]+$/;
+/** The execution ref the runner writes: `<runId>/<boardTaskId>`. */
+const RUNNER_REF = /^run-[0-9A-Za-z]+\/bt-[0-9a-f]{12}$/;
 
 /** The times the lead sent this task back, newest first. */
 function reworkEvents(board: Board, taskId: string) {
@@ -250,65 +257,10 @@ export function selectReadyTasks(
     );
 }
 
-/** One team run per project: two runs would fight over the project worktree. */
-function acquireLock(projectDir: string, runId: string): () => void {
-  const file = path.join(projectDir, ".deus", "team.lock");
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const payload = `${JSON.stringify({ pid: process.pid, runId })}\n`;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      // `wx` makes check-and-create a single syscall: two runs cannot both win.
-      fs.writeFileSync(file, payload, { encoding: "utf-8", flag: "wx" });
-      return () => {
-        try {
-          const owner = JSON.parse(fs.readFileSync(file, "utf-8")) as {
-            pid?: number;
-            runId?: string;
-          };
-          if (owner.pid === process.pid && owner.runId === runId) {
-            fs.rmSync(file, { force: true });
-          }
-        } catch {
-          // The lock vanished: nothing to release.
-        }
-      };
-    } catch (error) {
-      if ((error as { code?: string }).code !== "EEXIST") throw error;
-
-      let owner: { pid?: number; runId?: string } = {};
-      try {
-        owner = JSON.parse(fs.readFileSync(file, "utf-8")) as typeof owner;
-      } catch {
-        owner = {};
-      }
-      if (typeof owner.pid === "number" && isAlive(owner.pid)) {
-        throw new TeamError(
-          "team_busy",
-          `another team run is active (pid ${owner.pid}, run ${owner.runId ?? "?"})`,
-        );
-      }
-      fs.rmSync(file, { force: true });
-    }
-  }
-
-  throw new TeamError("team_busy", "cannot acquire .deus/team.lock");
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function shortRun(runId: string): string {
-  // The tail carries the millisecond stamp; the head is the date and would make
-  // every run of the same day share a worktree name.
-  const tail = runId.replace(/^run-/, "").replace(/[^0-9A-Za-z]/g, "").slice(-9);
-  return tail || "team";
+  // A hash of the whole id: a slice of the timestamp dropped an hour digit and
+  // let two runs of the same day share a worktree name.
+  return crypto.createHash("sha1").update(runId).digest("hex").slice(0, 10);
 }
 
 async function pool<T>(
@@ -629,20 +581,32 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
             error: `post-merge gate crashed: ${error instanceof Error ? error.message : String(error)}`,
           };
         }
+        if (merge.commit === undefined) {
+          return fail("the merge commit is unknown; nothing was accepted", "blocked");
+        }
+        if (!isAncestor(options.projectDir, merge.commit, "HEAD")) {
+          return fail("HEAD no longer contains the merge; nothing was accepted", "blocked");
+        }
+
         if (post.status !== "passed") {
           // Only undo a merge this run created, and only to the commit we saw.
           // `already-merged` means the project moved some other way: resetting
           // there would throw away someone else's work.
+          const moved = merge.commit !== undefined && !headIs(options.projectDir, merge.commit);
           const rolledBack =
             merge.status === "merged" &&
+            merge.commit !== undefined &&
+            !moved &&
             headBeforeMerge !== undefined &&
-            resetHard(options.projectDir, headBeforeMerge);
+            resetKeeping(options.projectDir, headBeforeMerge);
           const suffix =
             merge.status === "already-merged"
               ? " (the branch was already merged; the project was left as is)"
-              : rolledBack
-                ? " (merge rolled back)"
-                : " (rollback failed: check the project by hand)";
+              : moved
+                ? " (HEAD moved after the merge; the project was not rolled back)"
+                : rolledBack
+                  ? " (merge rolled back)"
+                  : " (rollback failed: check the project by hand)";
           return fail(
             `post-merge gate failed: ${post.error ?? "checks failed"}${suffix}`,
             "blocked",
@@ -711,6 +675,76 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
   }
 }
 
+/**
+ * A run that starts while the lock is free is looking at tasks left `running`
+ * by a run that died. Their executor is gone and `claim` never takes them, so
+ * without this they wait for a human who does not know they exist.
+ */
+function recoverRunningTasks(
+  board: Board,
+  fallbackActor: string,
+  projectDir: string,
+  onProgress?: (message: string) => void,
+): TaskRunResult[] {
+  const recovered: TaskRunResult[] = [];
+  const leads = new Map(board.listTeams().map((team) => [team.teamId, team.leadAgent]));
+
+  // Project-wide on purpose: the crash note is project-wide, and holding the
+  // lock proves no run is alive, so a stuck task may belong to any team.
+  for (const task of board.list({ status: "running", limit: 1_000 })) {
+    // The runner writes `<runId>/<boardTaskId>`. Anything else was set by a
+    // human or another tool through --board-task start and is not ours to end.
+    if (!RUNNER_REF.test(task.executionRef ?? "")) {
+      onProgress?.(
+        `${task.boardTaskId} is running without a runner ref; leave it to its owner ` +
+          `or run --board-task block --board-id ${task.boardTaskId}`,
+      );
+      continue;
+    }
+
+    const actor = leads.get(task.teamId) ?? fallbackActor;
+    const run = task.executionRef?.split("/")[0];
+    const branches = branchesMatching(projectDir, `deus/t-${task.boardTaskId}-*`);
+    const reason =
+      `the previous run${run ? ` ${run}` : ""} did not finish (attempt ${task.attempt}); ` +
+      `check git log --grep ${run ?? task.boardTaskId} — the merge may have landed` +
+      (branches.length > 0
+        ? `; branches: ${branches.slice(0, 3).join(", ")}`
+        : "; the attempt left no branch");
+
+    try {
+      board.block(task.boardTaskId, actor, reason.slice(0, 500));
+      recovered.push({
+        boardTaskId: task.boardTaskId,
+        title: task.title,
+        status: "blocked",
+        boardStatus: "blocked",
+        reason,
+        branch: branches[0],
+      });
+      onProgress?.(`recovered ${task.boardTaskId}: ${reason}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // If the task left `running` in the meantime, someone else acted; that is
+      // not a failure. If it is still running, the operator must know.
+      if (board.getTask(task.boardTaskId)?.status === "running") {
+        recovered.push({
+          boardTaskId: task.boardTaskId,
+          title: task.title,
+          status: "error",
+          boardStatus: "running",
+          reason: `cannot recover a task left running: ${message}`,
+        });
+        onProgress?.(
+          `error: ${task.boardTaskId} is still running and cannot be recovered (${message})`,
+        );
+      }
+    }
+  }
+
+  return recovered;
+}
+
 export async function runCodingTeam(
   client: OpenCodeClient,
   board: Board,
@@ -732,23 +766,56 @@ export async function runCodingTeam(
   );
   const projectDir = options.projectDir;
 
-  const status = worktreeStatus(projectDir);
-  if (status === undefined) {
-    throw new TeamError("not_git", "cannot read the project worktree");
-  }
-  if (status.length > 0) {
-    throw new TeamError(
-      "dirty_worktree",
-      "commit or stash your changes first: a team run merges into a clean project",
-    );
-  }
-
-  const release = acquireLock(projectDir, options.runId);
+  const lock = acquireProjectLock(projectDir, options.runId, "team");
   let leadDir: string | undefined;
+  let shortRunId: string | undefined;
+  let recovered: TaskRunResult[] = [];
   try {
+    // Recovery comes before any other check: a run killed inside `git merge`
+    // leaves a dirty tree, and the dirty check would otherwise hide the task
+    // that is stuck in `running`.
+    const ownerTeam = board.listTeams().find((row) => row.teamId === options.teamId);
+    const recoveryActor = ownerTeam?.leadAgent ?? options.actor ?? "team";
+    const crashed = readCrashMarker(projectDir);
+
+    if (lock.tookOverStale || crashed !== undefined) {
+      recovered = recoverRunningTasks(board, recoveryActor, projectDir, options.onProgress);
+    } else {
+      // Someone may have deleted a stale lock by hand. We cannot be sure a run
+      // died, so we only point at what looks like runner debris.
+      for (const task of board.list({ teamId: options.teamId, status: "running", limit: 1_000 })) {
+        if (!RUNNER_REF.test(task.executionRef ?? "")) continue;
+        options.onProgress?.(
+          `warn: ${task.boardTaskId} is still running from ${task.executionRef}; ` +
+            `run --board-task block --board-id ${task.boardTaskId} --board-actor ${recoveryActor}`,
+        );
+      }
+    }
+
+    // The note is project-wide, so it may describe a crash in another team. It
+    // is cleared only when no runner-owned task is left running anywhere.
+    if (crashed !== undefined) {
+      const stillRunning = board
+        .list({ status: "running", limit: 1_000 })
+        .some((task) => RUNNER_REF.test(task.executionRef ?? ""));
+      if (!stillRunning) clearCrashMarker(projectDir);
+    }
+
     // Everything below is per run, not per round: one lock, one baseline, one
     // merge queue, one sweep.
+    const status = worktreeStatus(projectDir);
+    if (status === undefined) {
+      throw new TeamError("not_git", "cannot read the project worktree");
+    }
+    if (status.length > 0) {
+      throw new TeamError(
+        "dirty_worktree",
+        "commit or stash your changes first: a team run merges into a clean project",
+      );
+    }
+
     const short = shortRun(options.runId);
+    shortRunId = short;
     const prepared = prepareWorkdir(projectDir, `baseline-${short}`, true);
     if (!prepared.worktree) {
       throw new TeamError("not_git", "--team-run needs a git repository with a checked-out branch");
@@ -828,7 +895,9 @@ export async function runCodingTeam(
 
     // One record per task, last write wins: a task that fails in round 1 and
     // merges in round 2 must not be counted twice.
-    const results = new Map<string, TaskRunResult>();
+    const results = new Map<string, TaskRunResult>(
+      recovered.map((task) => [task.boardTaskId, task]),
+    );
     const attempted = new Set<string>();
     const adjudicated = new Set<string>();
     let workCost = 0;
@@ -1046,20 +1115,38 @@ export async function runCodingTeam(
       costCapped,
     };
   } finally {
-    if (!options.keepWorktrees) sweepWorktrees(projectDir);
-    if (leadDir !== undefined) fs.rmSync(leadDir, { recursive: true, force: true });
-    release();
+    try {
+      if (!options.keepWorktrees && shortRunId !== undefined) {
+        sweepWorktrees(projectDir, shortRunId);
+      }
+      if (leadDir !== undefined) fs.rmSync(leadDir, { recursive: true, force: true });
+    } finally {
+      lock.release();
+    }
   }
 }
 
+/** Names this run created: task, baseline and post-gate scratch trees. */
+function ownWorktree(name: string, short: string): boolean {
+  return (
+    name.endsWith(`-${short}`) ||
+    name === `baseline-${short}` ||
+    name.startsWith(`scratch-${short}-`) ||
+    name === `scratch-${short}`
+  );
+}
+
 /**
- * Removes worktrees left by earlier attempts. Safe only while this run holds
- * the project lock: no other runner can be using them.
+ * Removes the worktrees of this run only. Trees of another run (a pipeline, an
+ * earlier crashed run, or one kept with --team-keep-worktrees) are left alone:
+ * deleting them could destroy someone's uncommitted work, and nobody asked for
+ * a garbage collector here.
  */
-function sweepWorktrees(projectDir: string): void {
+function sweepWorktrees(projectDir: string, short: string): void {
   const dir = path.join(projectDir, ".deus", "worktrees");
   if (!fs.existsSync(dir)) return;
   for (const entry of fs.readdirSync(dir)) {
+    if (!ownWorktree(entry, short)) continue;
     try {
       removeWorkdir(projectDir, path.join(dir, entry));
     } catch {

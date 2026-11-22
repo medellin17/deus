@@ -33,6 +33,7 @@ import {
 } from "./wake.ts";
 import { loadRegistry, agentModel } from "./registry.ts";
 import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
+import { acquireProjectLock } from "./lock.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 
 const DEFAULT_MODEL = "opencode-go/hy4-flash-free#high";
@@ -752,6 +753,10 @@ async function runPlanOnly(
   warnAboutDirtyTree(projectDir);
 
   const runId = makeRunId();
+  // The planner runs an agent in the project directory, so it takes the same
+  // project lock as a real run.
+  const runLock = acquireProjectLock(projectDir, runId, "pipeline");
+  process.once("exit", () => runLock.release());
   const model = options.modelExplicit
     ? options.model
     : (config.model ?? DEFAULT_MODEL);
@@ -1356,6 +1361,14 @@ async function main(): Promise<void> {
     );
   }
 
+  // A pipeline writes the same project worktree, `.deus/worktrees` and git
+  // index as a team run, so it takes the same project lock. An exception here
+  // leaves the file behind; the next run steals it by a dead pid.
+  const runLock = acquireProjectLock(projectDir, runId, "pipeline");
+  // Exceptions and normal exits both release; SIGKILL leaves the file and the
+  // next run takes it over by a dead pid.
+  process.once("exit", () => runLock.release());
+
   let workDir: string;
   let worktreeUsed: boolean;
   let baseCommit: string | undefined;
@@ -1521,6 +1534,7 @@ async function main(): Promise<void> {
     result.state.apply.status !== "merged" &&
     result.state.apply.status !== "no-changes";
 
+  runLock.release();
   process.exitCode = result.state.status === "succeeded" ? (mergePending ? 2 : 0) : 1;
 }
 

@@ -88,6 +88,12 @@ export function prepareWorkdir(
     return { workDir: projectDir, worktree: false };
   }
 
+  // Ids come from the board and end up in a path. They are always plain names;
+  // anything with a separator or `..` is an attempt to leave the directory.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId) || runId.includes("..")) {
+    throw new Error(`invalid worktree id: ${runId}`);
+  }
+
   try {
     git(projectDir, ["rev-parse", "--is-inside-work-tree"]);
   } catch {
@@ -144,6 +150,12 @@ export function removeWorkdir(projectDir: string, workDir: string): void {
   // `prepareWorkdir` falls back to the project itself when git is unreadable.
   // Removing that path would delete the repository.
   if (path.resolve(workDir) === path.resolve(projectDir)) return;
+
+  // The fallback below removes a directory recursively, so it may only ever
+  // touch our own worktree root.
+  const root = path.resolve(projectDir, ".deus", "worktrees");
+  const target = path.resolve(workDir);
+  if (!target.startsWith(`${root}${path.sep}`)) return;
 
   try {
     const repoRoot = git(projectDir, ["rev-parse", "--show-toplevel"]);
