@@ -57,6 +57,7 @@ function summary(overrides: Partial<TeamRunResult>): TeamRunResult {
     blocked: 0,
     errors: 0,
     skipped: 0,
+    waiting: 0,
     cost: 0,
     ...overrides,
   };
@@ -119,6 +120,21 @@ void describe("team-run CLI guards", () => {
       cli(["--team-run", "--team-name", "coding", "--team-parallel", "9", "--cwd", dir]).stderr,
       /--team-parallel must not exceed 8/,
     );
+  });
+
+  void it("validates the attempt limit", () => {
+    const dir = tempDir();
+    const result = cli([
+      "--team-run",
+      "--team-name",
+      "coding",
+      "--team-max-attempts",
+      "0",
+      "--cwd",
+      dir,
+    ]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--team-max-attempts must be a positive integer/);
   });
 
   void it("rejects an empty task list", () => {

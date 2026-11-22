@@ -6,6 +6,7 @@ import type { OpenCodeClient } from "./client.ts";
 import { SessionExecutor } from "./executor.ts";
 import { applyBaseline, runGate } from "./gate.ts";
 import {
+  branchDiff,
   branchExists,
   commitWorktree,
   createBranch,
@@ -21,6 +22,8 @@ import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 
 export const DEFAULT_MAX_PARALLEL = 3;
 export const MAX_PARALLEL = 8;
+/** A task that keeps coming back is stopped instead of looping forever. */
+export const DEFAULT_MAX_ATTEMPTS = 3;
 
 /** Errors that are the operator's fault, reported as `error: <code>: <text>`. */
 export class TeamError extends Error {
@@ -45,6 +48,8 @@ export interface CodingTeamOptions {
   /** Agent that writes the code. */
   agent?: string;
   maxParallel?: number;
+  /** Attempts a task may have before the runner blocks it. */
+  maxAttempts?: number;
   timeoutMs: number;
   /** Keep the worktree and branch after a successful merge. */
   keepWorktrees?: boolean;
@@ -77,6 +82,7 @@ export function teamExitCode(result: TeamRunResult): number {
   if (result.review + result.blocked > 0) return 2;
   // An interrupted run did not finish the queue: that is work left, not success.
   if (result.tasks.some((task) => task.reason === "interrupted")) return 2;
+  if (result.waiting > 0) return 2;
   return 0;
 }
 
@@ -88,21 +94,68 @@ export interface TeamRunResult {
   blocked: number;
   errors: number;
   skipped: number;
+  /** Tasks of the team still waiting for their turn after the run. */
+  waiting: number;
   cost: number;
 }
 
 const RUN_ID = /^run-[0-9A-Za-z]+$/;
 
-function promptFor(task: BoardTask): string {
+/** The times the lead sent this task back, newest first. */
+function reworkEvents(board: Board, taskId: string) {
+  return board
+    .events({ taskId, order: "desc", limit: 5_000 })
+    .filter((event) => event.type === "task/reworked");
+}
+
+/** Notes the lead attached to the times this task was sent back. */
+export function reworkNotes(board: Board, taskId: string, limit = 3): string[] {
+  const notes = reworkEvents(board, taskId)
+    .map((event) => (event.payload as { note?: unknown }).note)
+    .filter((note): note is string => typeof note === "string" && note.trim().length > 0)
+    .slice(0, limit)
+    .reverse();
+
+  return notes;
+}
+
+/** The branch a previous attempt left behind, if the board still knows it. */
+function previousBranch(task: BoardTask): string | undefined {
+  return task.artifacts.find((artifact) => artifact.startsWith("deus/"));
+}
+
+function promptFor(
+  task: BoardTask,
+  context: { notes: string[]; diff?: string },
+): string {
   const lines = [
     "Ты работаешь в отдельном git worktree этой задачи.",
     "",
     `Задача: ${task.title}`,
-    `Цель: ${task.goal}`,
   ];
+
+  // The lead's notes come before the goal: when they disagree, the note wins,
+  // and the goal is usually the thing that was just rejected.
+  if (context.notes.length > 0) {
+    lines.push("", "Предыдущая попытка отклонена. Это важнее цели ниже:");
+    for (const note of context.notes) lines.push(`- ${note}`);
+  }
+
+  lines.push("", `Цель: ${task.goal}`);
   if (task.doneWhen.trim().length > 0) {
     lines.push(`Готово, когда: ${task.doneWhen}`);
   }
+
+  if (context.diff !== undefined) {
+    lines.push(
+      "",
+      "Что уже сделано в предыдущей попытке (diff её ветки):",
+      "```diff",
+      context.diff,
+      "```",
+    );
+  }
+
   lines.push(
     "",
     "Правила:",
@@ -267,12 +320,51 @@ function verificationOf(status: Verification["status"], checks: unknown): Verifi
   return { status, checks };
 }
 
+/**
+ * An agent that ignored the rule and committed leaves a clean tree whose HEAD
+ * moved. Attach the branch to that commit so the work is not lost.
+ */
+function attachAgentCommit(
+  projectDir: string,
+  workDir: string,
+  branch: string,
+  baseCommit: string,
+): boolean {
+  const head = revParse(workDir, "HEAD");
+  if (head === undefined || head === baseCommit) return true;
+  if (worktreeStatus(workDir) !== "") return true;
+  if (branchExists(projectDir, branch)) return true;
+  return createBranch(workDir, branch);
+}
+
 async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResult }): Promise<TaskRunResult> {
   const { board, options, actor, agent } = deps;
   const base = { boardTaskId: task.boardTaskId, title: task.title };
   const claim = board.claim(task.boardTaskId, actor);
   if (!claim) {
     return { ...base, status: "skipped", reason: "another runner holds the task" };
+  }
+
+  // The budget counts times the lead sent the task back, not board attempts:
+  // a manual `retry` or a lost lease must not spend it.
+  const maxReworks = Math.max(1, Math.trunc(options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS));
+  const reworks = reworkEvents(board, task.boardTaskId).length;
+  if (reworks >= maxReworks) {
+    const branches = task.artifacts.filter((artifact) => artifact.startsWith("deus/"));
+    const reason =
+      `rework limit reached (${reworks}/${maxReworks}); raise --team-max-attempts or split the task` +
+      (branches.length > 0 ? `; attempts: ${branches.join(", ")}` : "");
+    try {
+      board.block(task.boardTaskId, actor, reason.slice(0, 500), claim.claimToken);
+    } catch {
+      // The board moved under us; report the limit without changing state.
+    }
+    return {
+      ...base,
+      status: "blocked",
+      boardStatus: board.getTask(task.boardTaskId)?.status,
+      reason,
+    };
   }
 
   // The baseline this task is judged against: the HEAD its worktree is cut
@@ -338,9 +430,23 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
     board.start(task.boardTaskId, claim.claimToken, `${options.runId}/${task.boardTaskId}`);
     started = true;
 
+    const notes = reworkNotes(board, task.boardTaskId);
+    if (notes.length === 0 && task.resultSummary && task.resultSummary.trim().length > 0) {
+      // No note from the lead: the runner's own verdict is the next best input.
+      notes.push(task.resultSummary.trim());
+    }
+    const prevBranch = previousBranch(task);
+    const diff = prevBranch ? branchDiff(options.projectDir, prevBranch) : undefined;
+    if (prevBranch && diff === undefined) {
+      options.onProgress?.(
+        `task ${task.boardTaskId}: previous branch ${prevBranch} has no readable diff`,
+      );
+    }
+    const prompt = promptFor(task, { notes, diff });
+
     const execution = await deps.executor.run({
-      step: { id: task.boardTaskId, agent, task: promptFor(task) },
-      prompt: promptFor(task),
+      step: { id: task.boardTaskId, agent, task: prompt },
+      prompt,
       runId: options.runId,
       index: deps.count.value++,
       workDir,
@@ -350,7 +456,7 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
     sessionID = execution.sessionID || undefined;
     cost = execution.cost ?? 0;
 
-    // Even a failed session must be findable: a rework wake goes to it.
+    // Even a failed session must be findable: messageTask and the board use it.
     if (sessionID) {
       recordStepSession(options.projectDir, options.runId, {
         stepId: task.boardTaskId,
@@ -365,11 +471,32 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
 
     gate = applyBaseline(taskBaseline, runGate(options.checks, workDir));
     if (gate.status === "failed") {
+      // Keep the attempt as a branch even though it failed the gate: the next
+      // attempt reads its diff, and nothing is merged, so the project never
+      // sees unverified code.
+      if (!attachAgentCommit(options.projectDir, workDir, branch, prepared.baseCommit)) {
+        return fail("cannot attach a branch to the agent's commit", "blocked");
+      }
+      const kept = commitWorktree({
+        projectDir: options.projectDir,
+        workDir,
+        branch,
+        message: `deus: ${task.title} (attempt ${claim.attempt}, gate failed)\n\nRun: ${options.runId}`,
+      });
+      const keptBranch =
+        kept.status === "committed" || kept.status === "existing" ? branch : undefined;
+
       board.submit(
         task.boardTaskId,
         claim.claimToken,
         verificationOf("failed", { gate }),
-        { summary: `gate failed: ${gate.error ?? "checks failed"}`, artifacts: sessionID ? [sessionID] : [] },
+        {
+          summary: `gate failed: ${gate.error ?? "checks failed"}`,
+          artifacts: [
+            ...(keptBranch ? [keptBranch] : []),
+            ...(sessionID ? [sessionID] : []),
+          ],
+        },
       );
       board.addMessage(task.boardTaskId, actor, `gate failed: ${gate.error ?? "checks failed"}`.trim());
       return {
@@ -384,15 +511,8 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
       };
     }
 
-    // An agent that ignored the rule and committed leaves a clean tree whose
-    // HEAD moved: attach the branch to that commit instead of losing the work.
-    const head = revParse(workDir, "HEAD");
-    if (head !== undefined && head !== prepared.baseCommit) {
-      if (worktreeStatus(workDir) === "" && !branchExists(options.projectDir, branch)) {
-        if (!createBranch(workDir, branch)) {
-          return fail("cannot attach a branch to the agent's commit", "blocked");
-        }
-      }
+    if (!attachAgentCommit(options.projectDir, workDir, branch, prepared.baseCommit)) {
+      return fail("cannot attach a branch to the agent's commit", "blocked");
     }
 
     const committed = commitWorktree({
@@ -634,6 +754,10 @@ export async function runCodingTeam(
       );
     });
 
+    const waiting = board
+      .list({ teamId: options.teamId, limit: 1_000 })
+      .filter((task) => task.status === "backlog" || task.status === "claimed").length;
+
     const summary: TeamRunResult = {
       runId: options.runId,
       tasks: results,
@@ -642,10 +766,28 @@ export async function runCodingTeam(
       blocked: results.filter((task) => task.status === "blocked").length,
       errors: results.filter((task) => task.status === "error").length,
       skipped: results.filter((task) => task.status === "skipped").length,
+      waiting,
       cost: results.reduce((total, task) => total + (task.cost ?? 0), 0),
     };
     return summary;
   } finally {
+    if (!options.keepWorktrees) sweepWorktrees(projectDir);
     release();
+  }
+}
+
+/**
+ * Removes worktrees left by earlier attempts. Safe only while this run holds
+ * the project lock: no other runner can be using them.
+ */
+function sweepWorktrees(projectDir: string): void {
+  const dir = path.join(projectDir, ".deus", "worktrees");
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir)) {
+    try {
+      removeWorkdir(projectDir, path.join(dir, entry));
+    } catch {
+      // Best effort: a busy directory is not worth failing the run.
+    }
   }
 }

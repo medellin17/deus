@@ -49,12 +49,20 @@ function newTask(board: Board, overrides: Partial<CreateTaskInput> = {}) {
 }
 
 /** Drives a task to review and returns its id. */
-function submitTask(board: Board, dir: string, executionRef?: string): string {
+function submitTask(
+  board: Board,
+  dir: string,
+  executionRef?: string,
+  artifacts: string[] = [],
+): string {
   const task = newTask(board);
   const claim = board.claim(task.boardTaskId, "main");
   assert.ok(claim);
   board.start(task.boardTaskId, claim.claimToken, executionRef ?? `run-test/${task.boardTaskId}`);
-  board.submit(task.boardTaskId, claim.claimToken, { status: "passed" }, { summary: "ok" });
+  board.submit(task.boardTaskId, claim.claimToken, { status: "passed" }, {
+    summary: "ok",
+    artifacts,
+  });
   return task.boardTaskId;
 }
 
@@ -352,6 +360,23 @@ void describe("wake outbox", () => {
     assert.equal(queue.stats().expired, 1);
   });
 
+  void it("cancels a leftover rework wake from an older build", () => {
+    const { dir } = newBoard();
+    const queue = newWake(dir);
+    queue.enqueue({
+      dedupKey: "legacy-rework",
+      teamId: "t",
+      eventType: "task/rework",
+      recipient: { sessionID: "ses-old-worker" },
+    });
+    assert.equal(queue.stats().pending, 1);
+
+    assert.equal(queue.claim(), null);
+    const [event] = queue.list({ limit: 5 });
+    assert.equal(event.status, "cancelled");
+    assert.equal(event.outcome, "rework is runner-led");
+  });
+
   void it("opens read-only only when the board exists", () => {
     const empty = tempDir();
     assert.equal(openWakeReadonly(empty), undefined);
@@ -418,89 +443,49 @@ void describe("wake outbox", () => {
     assert.equal(openWakeReadonly(dir), undefined);
   });
 
-  void it("wakes the task's own session when the lead asks for rework", () => {
+  void it("sends a reworked task back with its evidence and wakes nobody", () => {
     const { board, dir } = newBoard();
     registerLeadSession(dir, "ses-lead");
     const ref = writeRun(dir, "run-rework", "fix", "ses-worker");
-    const taskId = submitTask(board, dir, ref);
+    const taskId = submitTask(board, dir, ref, [ref, "ses-worker"]);
     const queue = newWake(dir);
 
     board.rework(taskId, "main", "add line numbers");
 
-    const events = queue.list({ limit: 20 });
-    const review = events.find((event) => event.eventType === "task/review-ready");
-    const rework = events.find((event) => event.eventType === "task/rework");
-
-    assert.equal(review?.status, "cancelled");
-    assert.ok(rework, "a rework event should exist");
-    assert.equal(rework.recipient.sessionID, "ses-worker");
-    assert.equal(rework.attempts, 0);
-    assert.deepEqual(
-      (rework.payload as { note?: string }).note,
-      "add line numbers",
+    // Nobody is woken: the old worktree belongs to the previous attempt and the
+    // next attempt starts in a fresh one.
+    assert.equal(
+      queue.list({ limit: 20 }).filter((event) => event.eventType === "task/rework").length,
+      0,
     );
+    const review = queue
+      .list({ limit: 20 })
+      .find((event) => event.eventType === "task/review-ready");
+    assert.equal(review?.status, "cancelled");
+
+    const task = board.getTask(taskId);
+    assert.equal(task?.status, "backlog");
+    assert.equal(task?.attempt, 2);
+    // The evidence of the returned attempt survives.
+    assert.equal(task?.resultSummary, "ok");
+    assert.deepEqual(task?.artifacts, [ref, "ses-worker"]);
+    assert.equal(task?.executionRef, undefined);
+
+    const events = board.events({ taskId, limit: 50 }).filter((event) => event.type === "task/reworked");
+    assert.equal(events.length, 1);
+    assert.deepEqual((events[0].payload as { note?: string }).note, "add line numbers");
   });
 
-  void it("drops a blank rework note instead of sending an empty line", () => {
+  void it("drops a blank rework note instead of storing an empty one", () => {
     const { board, dir } = newBoard();
     registerLeadSession(dir, "ses-lead");
-    const ref = writeRun(dir, "run-blank", "fix", "ses-worker");
-    const taskId = submitTask(board, dir, ref);
-    const queue = newWake(dir);
+    const taskId = submitTask(board, dir);
 
     board.rework(taskId, "main", "   ");
 
-    const rework = queue.list({ limit: 20 }).find((event) => event.eventType === "task/rework");
-    assert.ok(rework);
-    assert.equal((rework.payload as { note?: string }).note, undefined);
-  });
-
-  void it("does not enqueue a rework event without a resolvable session", () => {
-    const { board, dir } = newBoard();
-    registerLeadSession(dir, "ses-lead");
-    const taskId = submitTask(board, dir); // fake execution_ref, no run.json
-    const queue = newWake(dir);
-
-    board.rework(taskId, "main", "try again");
-
-    assert.equal(queue.list({ limit: 20 }).filter((event) => event.eventType === "task/rework").length, 0);
-  });
-
-  void it("keeps one rework event per attempt", () => {
-    const { board, dir } = newBoard();
-    registerLeadSession(dir, "ses-lead");
-    const firstRef = writeRun(dir, "run-r1", "fix", "ses-worker");
-    const taskId = submitTask(board, dir, firstRef);
-    const queue = newWake(dir);
-
-    board.rework(taskId, "main", "round two");
-
-    const secondRef = writeRun(dir, "run-r2", "fix", "ses-worker");
-    const claim = board.claim(taskId, "main");
-    assert.ok(claim);
-    board.start(taskId, claim.claimToken, secondRef);
-    board.submit(taskId, claim.claimToken, { status: "passed" }, { summary: "again" });
-    board.rework(taskId, "main", "round three");
-
-    const rewakes = queue.list({ limit: 20 }).filter((event) => event.eventType === "task/rework");
-    assert.equal(rewakes.length, 2);
-  });
-
-  void it("delivers the rework note to the worker session", async () => {
-    const { board, dir } = newBoard();
-    registerLeadSession(dir, "ses-lead");
-    const ref = writeRun(dir, "run-note", "fix", "ses-worker");
-    const taskId = submitTask(board, dir, ref);
-    const queue = newWake(dir);
-    board.rework(taskId, "main", "cite line numbers");
-
-    const { client, calls } = fakeClient();
-    const result = await runWave(client, queue, { maxSteps: 1 });
-
-    assert.equal(result.delivered, 1);
-    assert.match(calls.prompt[0], /cite line numbers/);
-    assert.match(calls.prompt[0], /Do the requested work/);
-    assert.deepEqual(calls.promptSessions, ["ses-worker"]);
+    const events = board.events({ taskId, limit: 50 }).filter((event) => event.type === "task/reworked");
+    assert.equal(events.length, 1);
+    assert.equal((events[0].payload as { note?: string }).note, undefined);
   });
 
   void it("cancels a pending wake when the task is accepted", () => {

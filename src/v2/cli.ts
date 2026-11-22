@@ -89,6 +89,7 @@ interface CliOptions {
   teamLead?: string;
   teamRun: boolean;
   teamParallel?: number;
+  teamMaxAttempts?: number;
   teamTasks?: string;
   teamKeepWorktrees: boolean;
   direct: boolean;
@@ -126,6 +127,7 @@ Options:
   --team-run           Run the team's ready tasks in parallel worktrees
   --team-parallel <n>  Agents at once for --team-run (default: 3, max 8)
   --team-tasks <ids>   Comma-separated board task ids for --team-run
+  --team-max-attempts <n> Attempts before a task is blocked (default: 3)
   --team-keep-worktrees Keep worktrees and branches after a successful merge
   --board-task <act>   Board mutation: add|claim|start|submit|accept|rework|retry|block|cancel
   --board-id <id>      Task id for --board-task
@@ -345,6 +347,12 @@ function parseArgs(argv: string[]): CliOptions {
       case "--team-tasks":
         options.teamTasks = next();
         break;
+      case "--team-max-attempts":
+        options.teamMaxAttempts = Number(next());
+        if (!Number.isInteger(options.teamMaxAttempts) || options.teamMaxAttempts < 1) {
+          throw new CliInputError("--team-max-attempts must be a positive integer");
+        }
+        break;
       case "--team-keep-worktrees":
         options.teamKeepWorktrees = true;
         break;
@@ -467,6 +475,7 @@ function parseArgs(argv: string[]): CliOptions {
   if (!options.teamRun) {
     const strays: Array<[boolean, string]> = [
       [options.teamTasks !== undefined, "--team-tasks"],
+      [options.teamMaxAttempts !== undefined, "--team-max-attempts"],
       [options.teamParallel !== undefined, "--team-parallel"],
       [options.teamKeepWorktrees, "--team-keep-worktrees"],
     ];
@@ -1119,6 +1128,7 @@ async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number
       actor: options.boardActor,
       agent: options.agent ?? "build",
       maxParallel: options.teamParallel,
+      maxAttempts: options.teamMaxAttempts,
       timeoutMs: options.timeoutSeconds * 1_000,
       keepWorktrees: options.teamKeepWorktrees,
       taskIds: options.teamTasks
@@ -1144,8 +1154,8 @@ async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number
     }
     console.log(
       `team: merged=${result.merged} review=${result.review} blocked=${result.blocked} ` +
-        `errors=${result.errors} skipped=${result.skipped} cost=~$${result.cost.toFixed(4)} ` +
-        `run=${result.runId}`,
+        `errors=${result.errors} skipped=${result.skipped} waiting=${result.waiting} ` +
+        `cost=~$${result.cost.toFixed(4)} run=${result.runId}`,
     );
 
     return teamExitCode(result);

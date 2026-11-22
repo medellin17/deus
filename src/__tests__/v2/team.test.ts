@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 
 import { BoardError, openBoard, type Board } from "../../v2/board.ts";
 import type { OpenCodeClient } from "../../v2/client.ts";
-import { runCodingTeam, selectReadyTasks, TeamError } from "../../v2/team.ts";
+import { runCodingTeam, selectReadyTasks, teamExitCode, TeamError } from "../../v2/team.ts";
 import type { Executor, ExecutorInput, StepExecution } from "../../v2/types.ts";
 
 const tempDirs: string[] = [];
@@ -76,13 +76,20 @@ interface FakeOptions {
   run: (input: ExecutorInput) => Promise<void> | void;
 }
 
-function fakeExecutor(options: FakeOptions): { executor: Executor; calls: string[] } {
+function fakeExecutor(options: FakeOptions): {
+  executor: Executor;
+  calls: string[];
+  prompts: string[];
+} {
   const calls: string[] = [];
+  const prompts: string[] = [];
   return {
     calls,
+    prompts,
     executor: {
       async run(input: ExecutorInput): Promise<StepExecution> {
         calls.push(input.workDir);
+        prompts.push(input.prompt);
         await options.run(input);
         return ok(input);
       },
@@ -348,6 +355,127 @@ void describe("runCodingTeam", () => {
     assert.equal(second.merged, 1, second.tasks[0]?.reason ?? "");
     assert.equal(board.getTask(taskId)?.status, "done");
     assert.equal(git(repo, "log", "--oneline", "--all").split("\n").length >= 3, true);
+  });
+
+  void it("carries the rework note and the previous diff into the next attempt", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "fix the note");
+
+    let first = true;
+    const { executor, prompts } = fakeExecutor({
+      run: (input) => {
+        if (first) {
+          fs.writeFileSync(path.join(input.workDir, "broken.txt"), "x\n", "utf-8");
+        } else {
+          fs.writeFileSync(path.join(input.workDir, "fixed.txt"), "y\n", "utf-8");
+        }
+      },
+    });
+
+    const attempt1 = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-loop1", executor),
+      checks: NO_BROKEN,
+    });
+    assert.equal(attempt1.review, 1);
+    const returned = board.getTask(taskId);
+    assert.equal(returned?.artifacts.some((artifact) => artifact.startsWith("deus/")), true);
+
+    board.rework(taskId, "lead", "remove the broken file and write fixed.txt");
+    first = false;
+
+    const attempt2 = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-loop2", executor),
+      checks: NO_BROKEN,
+    });
+
+    assert.equal(attempt2.merged, 1, attempt2.tasks[0]?.reason ?? "");
+    assert.equal(board.getTask(taskId)?.status, "done");
+    assert.equal(prompts.length, 2, "the second attempt must run an agent");
+    assert.match(prompts[1], /remove the broken file and write fixed\.txt/);
+    assert.match(prompts[1], /Предыдущая попытка отклонена/);
+    // The previous branch carried broken.txt; its diff is shown, not re-run blindly.
+    assert.match(prompts[1], /broken\.txt/);
+    assert.match(prompts[1], /```diff/);
+  });
+
+  void it("blocks a task that exhausted its attempts instead of looping", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "never good enough");
+
+    for (let round = 0; round < 3; round++) {
+      const claim = board.claim(taskId, "lead");
+      assert.ok(claim);
+      board.start(taskId, claim.claimToken, `run-loop/${taskId}`);
+      board.submit(taskId, claim.claimToken, { status: "passed" }, { summary: "again" });
+      board.rework(taskId, "lead", `round ${round + 1}`);
+    }
+    assert.equal(board.getTask(taskId)?.attempt, 4);
+
+    const { executor, calls } = fakeExecutor({ run: () => undefined });
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-limit", executor),
+      maxAttempts: 3,
+    });
+
+    assert.equal(result.blocked, 1);
+    assert.equal(calls.length, 0);
+    assert.equal(board.getTask(taskId)?.status, "blocked");
+    assert.match(board.getTask(taskId)?.blockedReason ?? "", /rework limit/);
+  });
+
+  void it("does not spend the rework budget on a manual retry", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "retried by hand");
+
+    for (let round = 0; round < 2; round++) {
+      const claim = board.claim(taskId, "lead");
+      assert.ok(claim);
+      board.start(taskId, claim.claimToken, `run-manual/${taskId}`);
+      board.submit(taskId, claim.claimToken, { status: "passed" }, { summary: "again" });
+      board.rework(taskId, "lead", `note ${round + 1}`);
+    }
+    // A manual stop and retry bumps `attempt` but is not a rework: it must not
+    // push the task over the ceiling.
+    board.block(taskId, "lead", "stopped by hand");
+    board.retry(taskId, "lead");
+    assert.equal(board.getTask(taskId)?.attempt, 4);
+
+    const { executor } = fakeExecutor({
+      run: (input) => fs.writeFileSync(path.join(input.workDir, "done.txt"), "x\n", "utf-8"),
+    });
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-manual", executor),
+      maxAttempts: 3,
+    });
+
+    assert.equal(result.merged, 1, result.tasks[0]?.reason ?? "");
+    assert.equal(board.getTask(taskId)?.status, "done");
+  });
+
+  void it("reports work it could not start instead of claiming success", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const first = addTask(board, teamId, "first");
+    const second = board.createTask({
+      teamId,
+      title: "second",
+      goal: "g",
+      actor: "lead",
+      dependsOn: [first],
+    }).boardTaskId;
+
+    const { executor } = fakeExecutor({ run: () => undefined });
+    const result = await runCodingTeam({} as OpenCodeClient, board, {
+      ...teamOptions(repo, teamId, "run-waiting", executor),
+      taskIds: [second],
+    });
+
+    assert.equal(result.tasks.length, 0);
+    assert.equal(result.waiting, 2, "both the dependency and the waiting task remain");
+    assert.equal(teamExitCode(result), 2);
   });
 
   void it("never runs more agents than the parallel limit", async () => {

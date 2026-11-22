@@ -24,7 +24,7 @@ export const DEFAULT_COALESCE_MS = 30_000;
 const MAX_BATCH = 10;
 
 export type WakeStatus = "pending" | "delivered" | "failed" | "expired" | "cancelled";
-export type WakeEventType = "task/review-ready" | "task/blocked" | "task/rework";
+export type WakeEventType = "task/review-ready" | "task/blocked";
 
 export interface WakeEvent {
   wakeEventId: string;
@@ -455,6 +455,18 @@ class SqliteWake implements WakeQueue {
         )
         .run(now);
 
+      // Rework is runner-led now: a leftover `task/rework` row from an older
+      // build would wake a session whose worktree nobody will merge.
+      this.db
+        .prepare(
+          `UPDATE wake_events
+              SET status = 'cancelled', outcome = 'rework is runner-led',
+                  claim_token = NULL, lease_until = NULL
+            WHERE status = 'pending' AND event_type = 'task/rework'
+              AND (lease_until IS NULL OR lease_until < ?)`,
+        )
+        .run(now);
+
       // Overdue events are closed instead of delivered late. An event that is
       // being delivered right now has a live lease and is left alone.
       this.db
@@ -867,11 +879,9 @@ function renderWake(events: WakeEvent[]): string {
   }
   const types = new Set(events.map((event) => event.eventType));
   const footer =
-    types.size === 1 && events[0].eventType === "task/rework"
-      ? "Do the requested work, then submit it again."
-      : types.size === 1 && events[0].eventType === "task/blocked"
-        ? "Decide how to unblock: retry | cancel."
-        : "Reply with a decision (accept | rework | retry).";
+    types.size === 1 && events[0].eventType === "task/blocked"
+      ? "Decide how to unblock: retry | cancel."
+      : "Reply with a decision (accept | rework | retry).";
 
   lines.push("", footer);
   return lines.join("\n");

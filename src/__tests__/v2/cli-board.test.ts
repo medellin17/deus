@@ -172,7 +172,7 @@ void describe("board CLI", () => {
     assert.match(added.stderr, /error: not_found/);
   });
 
-  void it("passes the rework note through to the wake outbox", () => {
+  void it("records the rework note and keeps the returned attempt", () => {
     const dir = tempDir();
     const runDir = path.join(dir, ".deus", "runs", "run-cli");
     fs.mkdirSync(runDir, { recursive: true });
@@ -238,17 +238,25 @@ void describe("board CLI", () => {
     assert.equal(reworked.code, 0, reworked.stderr);
 
     const db = new Database(path.join(dir, ".deus", "board.db"), { readonly: true });
-    const row = db
+    const event = db
       .prepare(
-        `SELECT event_type, recipient_json, payload_json FROM wake_events
-          WHERE event_type = 'task/rework'`,
+        `SELECT payload_json FROM board_events
+          WHERE event_type = 'task/reworked' ORDER BY id DESC LIMIT 1`,
       )
-      .get() as { event_type: string; recipient_json: string; payload_json: string };
+      .get() as { payload_json: string };
+    const wakes = db
+      .prepare(`SELECT COUNT(*) AS total FROM wake_events WHERE event_type = 'task/rework'`)
+      .get() as { total: number };
+    const task = db
+      .prepare(`SELECT attempt FROM board_tasks WHERE board_task_id = ?`)
+      .get(taskId) as { attempt: number };
     db.close();
 
-    assert.equal(row.event_type, "task/rework");
-    assert.equal(JSON.parse(row.recipient_json).sessionID, "ses-cli-worker");
-    assert.equal(JSON.parse(row.payload_json).note, "add line numbers");
+    // The note is the input of the next attempt; the returned attempt keeps its
+    // evidence; nobody is woken for a tree that will never be merged.
+    assert.equal(JSON.parse(event.payload_json).note, "add line numbers");
+    assert.equal(wakes.total, 0);
+    assert.equal(task.attempt, 2);
   });
 
   void it("requires a token to block a live task as a stranger", () => {

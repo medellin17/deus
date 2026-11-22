@@ -397,3 +397,25 @@ export function resetHard(cwd: string, ref: string): boolean {
 export function deleteBranch(cwd: string, branch: string): boolean {
   return git(cwd, ["branch", "-d", branch]).status === 0;
 }
+
+/**
+ * Changes a branch carries relative to the point it forked from HEAD. Used to
+ * show the next attempt what the previous one already did.
+ */
+export function branchDiff(
+  projectDir: string,
+  branch: string,
+  maxChars = 30_000,
+): string | undefined {
+  if (!branchExists(projectDir, branch)) return undefined;
+
+  const base = git(projectDir, ["merge-base", "HEAD", branch]);
+  if (base.status !== 0) return undefined;
+
+  const diff = git(projectDir, ["diff", `${base.stdout.trim()}..${branch}`]);
+  if (diff.status !== 0) return undefined;
+
+  const text = (diff.stdout ?? "").trim();
+  if (text.length === 0) return undefined;
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (обрезано)` : text;
+}

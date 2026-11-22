@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-import { resolveTaskSession } from "./sessions.ts";
 import { openStore, openStoreReadonly } from "./store.ts";
 import { enqueueTransitionWake, cancelTaskWakes } from "./wake.ts";
 
@@ -680,31 +679,18 @@ class SqliteBoard implements Board {
         .prepare(
           `UPDATE board_tasks
               SET status = 'backlog', attempt = attempt + 1,
-                  execution_ref = NULL, result_summary = NULL, artifacts_json = '[]',
-                  verification_json = NULL, blocked_reason = NULL, finished_at = NULL,
+                  execution_ref = NULL, verification_json = NULL,
+                  blocked_reason = NULL, finished_at = NULL,
                   claim_token = NULL, lease_until = NULL, updated_at = ?
             WHERE board_task_id = ?`,
         )
         .run(now, taskId);
       this.recordEvent(row.team_id, taskId, "task/reworked", actor, { note: cleanNote });
       cancelTaskWakes(this.db, taskId, "reworked");
-
-      // Wake the executor itself: it is the one who has to act on the note.
-      const address = row.execution_ref
-        ? resolveTaskSession(this.projectDir, row.execution_ref)
-        : undefined;
-      if (address) {
-        enqueueTransitionWake(this.db, this.projectDir, {
-          teamId: row.team_id,
-          taskId,
-          attempt: row.attempt + 1,
-          eventType: "task/rework",
-          recipient: address,
-          title: row.title,
-          status: "rework",
-          payload: { note: cleanNote, previousStatus: row.status },
-        });
-      }
+      // `result_summary` and `artifacts` stay: they are the evidence of the
+      // attempt being sent back, and the next attempt reads them (branch diff).
+      // The old session is deliberately not woken: its worktree belongs to the
+      // previous attempt and no one will merge it.
     });
   }
 
