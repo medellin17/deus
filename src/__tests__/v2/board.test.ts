@@ -349,6 +349,26 @@ void describe("board", () => {
     );
   });
 
+  void it("records a message event without changing the status", () => {
+    const board = newBoard();
+    const task = newTask(board);
+    complete(board, task.boardTaskId);
+    const before = board.events({ taskId: task.boardTaskId }).length;
+
+    board.addMessage(task.boardTaskId, "main", "please review");
+
+    const events = board.events({ taskId: task.boardTaskId });
+    assert.equal(board.getTask(task.boardTaskId)?.status, "done");
+    assert.equal(events.length, before + 1);
+    assert.equal(events[events.length - 1].type, "task/message");
+    assert.deepEqual(events[events.length - 1].payload, { text: "please review" });
+
+    assert.throws(
+      () => board.addMessage(task.boardTaskId, "main", "   "),
+      isBoardError("invalid_transition"),
+    );
+  });
+
   void it("rejects a skipped verification on accept", () => {
     const board = newBoard();
     const task = newTask(board);
@@ -395,6 +415,20 @@ void describe("board", () => {
 
     assert.deepEqual(after.slice(0, before.length), before);
     assert.equal(after.length, before.length + 1);
+  });
+
+  void it("allows a comment on a task of a closed team", () => {
+    const board = newBoard();
+    const task = newTask(board);
+    complete(board, task.boardTaskId);
+    const team = board.getTeamByName("main");
+    assert.ok(team);
+    board.closeTeam(team.teamId, "main");
+
+    board.addMessage(task.boardTaskId, "main", "after the team was closed");
+
+    const events = board.events({ taskId: task.boardTaskId });
+    assert.equal(events[events.length - 1].type, "task/message");
   });
 
   void it("supports newest-first event ordering", () => {

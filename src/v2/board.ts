@@ -149,6 +149,8 @@ export interface Board {
   block(taskId: string, actor: string, reason: string, claimToken?: string): void;
   retry(taskId: string, actor: string): void;
   cancel(taskId: string, actor: string, claimToken?: string): void;
+  /** Appends a comment event; allowed on terminal tasks, never changes status. */
+  addMessage(taskId: string, actor: string, text: string): void;
 
   list(filter?: { teamId?: string; status?: BoardStatus; limit?: number }): BoardTask[];
   events(filter?: {
@@ -835,6 +837,17 @@ class SqliteBoard implements Board {
         )
         .run(now, now, taskId);
       this.recordEvent(row.team_id, taskId, "task/cancelled", actor, {});
+    });
+  }
+
+  addMessage(taskId: string, actor: string, text: string): void {
+    if (text.trim().length === 0) {
+      throw new BoardError("invalid_transition", "message must not be empty");
+    }
+
+    this.write(() => {
+      const row = this.mustTaskRow(taskId);
+      this.recordEvent(row.team_id, taskId, "task/message", actor, { text });
     });
   }
 
