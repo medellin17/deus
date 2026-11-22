@@ -57,6 +57,8 @@ export interface SessionExecutorOptions {
   keepSessions?: boolean;
   onLog?: (message: string) => void;
   firstOutputMs?: number;
+  /** Per-agent model override; the run-level model stays the fallback. */
+  modelFor?: (agent: string) => string | undefined;
 }
 
 function isAssistant(message: SessionMessageInfo): message is SessionMessageAssistant {
@@ -99,7 +101,7 @@ export class SessionExecutor implements Executor {
   private readonly options: Required<
     Pick<SessionExecutorOptions, "model" | "policy" | "keepSessions" | "firstOutputMs">
   > &
-    Pick<SessionExecutorOptions, "onLog">;
+    Pick<SessionExecutorOptions, "onLog" | "modelFor">;
 
   constructor(client: OpenCodeClient, options: SessionExecutorOptions) {
     this.client = client;
@@ -109,6 +111,7 @@ export class SessionExecutor implements Executor {
       keepSessions: options.keepSessions ?? true,
       firstOutputMs: options.firstOutputMs ?? DEFAULT_FIRST_OUTPUT_MS,
       onLog: options.onLog,
+      modelFor: options.modelFor,
     };
   }
 
@@ -120,6 +123,10 @@ export class SessionExecutor implements Executor {
     const startedAt = new Date().toISOString();
     const started = Date.now();
     const timeoutMs = input.step.timeoutMs ?? input.timeoutMs;
+    const model = this.options.modelFor?.(input.step.agent) ?? this.options.model;
+    if (model !== this.options.model) {
+      this.log(`step ${input.step.id}: agent model ${model}`);
+    }
     const title = `[deus-v2] ${input.runId} · ${input.step.id}`;
 
     let sessionID = "";
@@ -129,7 +136,7 @@ export class SessionExecutor implements Executor {
       const session = await this.client.session.create({
         title,
         agent: input.step.agent,
-        model: parseModelRef(this.options.model),
+        model: parseModelRef(model),
         location: { directory: input.workDir },
         permissions: [...SESSION_OVERLAY, ...(input.step.permissions ?? [])],
       });
@@ -294,7 +301,7 @@ export class SessionExecutor implements Executor {
       const cost = reportedCost > 0
         ? reportedCost
         : tokens
-          ? estimateCost(this.options.model, tokens)
+          ? estimateCost(model, tokens)
           : 0;
       const result: StepExecution = {
         stepId: input.step.id,
@@ -338,7 +345,7 @@ export class SessionExecutor implements Executor {
           cost = reportedCost > 0
             ? reportedCost
             : tokens
-              ? estimateCost(this.options.model, tokens)
+              ? estimateCost(model, tokens)
               : 0;
         } catch {
           // The session may already be gone; keep the error as is.

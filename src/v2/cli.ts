@@ -19,6 +19,7 @@ import {
 } from "./pipeline.ts";
 import { generatePlan, planToSteps, validatePlan } from "./planner.ts";
 import { getPipeline } from "./pipelines.ts";
+import { loadRegistry, agentModel } from "./registry.ts";
 import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
 
@@ -455,8 +456,12 @@ async function runPlanOnly(
   const maxCost = options.maxCostExplicit ? options.maxCost : config.maxCost;
 
   const client = await createOpenCodeClient();
+  const registry = loadRegistry(projectDir);
   const executor = new SessionExecutor(client, {
     model,
+    modelFor: options.modelExplicit
+      ? undefined
+      : (agent: string) => agentModel(registry, agent, model),
     policy: loadPolicy(resolvePolicyPath(options, config, projectDir)),
     keepSessions: false,
     onLog: log,
@@ -623,8 +628,16 @@ async function main(): Promise<void> {
   }
 
   const client = await createOpenCodeClient();
+  // An explicit --model is the only thing that disables per-agent models. A
+  // resumed run keeps using the agent model: `state.model` is derived, not a
+  // choice, so remaining steps must behave like they would on a fresh run.
+  const registry = loadRegistry(workDir);
+  const modelFor = options.modelExplicit
+    ? undefined
+    : (agent: string) => agentModel(registry, agent, model);
   const executor = new SessionExecutor(client, {
     model,
+    modelFor,
     policy: loadPolicy(resolvePolicyPath(options, config, projectDir)),
     keepSessions: true,
     onLog: log,

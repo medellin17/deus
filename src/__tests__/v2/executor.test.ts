@@ -249,3 +249,77 @@ describe("first output watchdog", () => {
     assert.equal(calls.interrupt, 1);
   });
 });
+
+describe("per-agent model", () => {
+  void it("creates the session with the agent model and prices it with that model", async () => {
+    const created: Array<{ providerID: string; id: string; variant?: string }> = [];
+    const logs: string[] = [];
+    const client = {
+      session: {
+        create: async (input: {
+          model: { providerID: string; id: string; variant?: string };
+        }) => {
+          created.push(input.model);
+          return { id: "ses-1" };
+        },
+        prompt: async () => undefined,
+        get: async () => ({
+          id: "ses-1",
+          outcome: "stop",
+          tokens: {
+            input: 1_000_000,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          cost: 0,
+        }),
+        interrupt: async () => ({ interrupted: false }),
+        remove: async () => undefined,
+      },
+      permission: {
+        list: async () => [],
+      },
+      message: {
+        list: async () => ({
+          data: [
+            {
+              type: "assistant",
+              finish: "stop",
+              content: [{ type: "text", text: "done" }],
+            },
+          ],
+        }),
+      },
+    } as unknown as OpenCodeClient;
+
+    const executor = new SessionExecutor(client, {
+      model: "tokenharbor/deepseek-v4.1-flash:free",
+      modelFor: (agent) =>
+        agent === "builder" ? "opencode-go/deepseek-v4.1-flash#high" : undefined,
+      keepSessions: true,
+      onLog: (message) => logs.push(message),
+    });
+
+    const result = await executor.run({
+      step: { id: "s1", agent: "builder", task: "do it" },
+      prompt: "do it",
+      runId: "run-1",
+      index: 0,
+      workDir: "/tmp",
+      timeoutMs: 1000,
+    });
+
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(created, [
+      { providerID: "opencode-go", id: "deepseek-v4.1-flash", variant: "high" },
+    ]);
+    // The free run model would price at 0; the agent model prices this at 0.15.
+    assert.equal(result.cost, 0.15);
+    assert.equal(result.costEstimated, true);
+    assert.ok(
+      logs.some((line) => line.includes("agent model opencode-go/deepseek-v4.1-flash#high")),
+      "the override should be logged so artifacts are not misleading",
+    );
+  });
+});
