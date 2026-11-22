@@ -10,6 +10,7 @@ import {
   DEFAULT_FOLLOWUP_TIMEOUT_MS,
   followUp,
   messageTask,
+  recordStepSession,
   resolveTaskSession,
 } from "../../v2/sessions.ts";
 
@@ -819,5 +820,59 @@ void describe("messageTask", () => {
 
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /no session found/);
+  });
+});
+
+void describe("recordStepSession", () => {
+  void it("writes a step that resolveTaskSession can find", () => {
+    const dir = tempDir();
+    recordStepSession(dir, "run-team01", {
+      stepId: "bt-1",
+      sessionID: "ses-worker",
+      agent: "build",
+    });
+
+    assert.deepEqual(resolveTaskSession(dir, "run-team01/bt-1"), {
+      sessionID: "ses-worker",
+      runId: "run-team01",
+      stepId: "bt-1",
+      agent: "build",
+    });
+  });
+
+  void it("keeps the newest session for the same step", () => {
+    const dir = tempDir();
+    recordStepSession(dir, "run-team02", { stepId: "bt-1", sessionID: "ses-first", agent: "build" });
+    recordStepSession(dir, "run-team02", { stepId: "bt-1", sessionID: "ses-second", agent: "build" });
+    recordStepSession(dir, "run-team02", { stepId: "bt-2", sessionID: "ses-other", agent: "build" });
+
+    assert.equal(resolveTaskSession(dir, "run-team02/bt-1")?.sessionID, "ses-second");
+    assert.equal(resolveTaskSession(dir, "run-team02/bt-2")?.sessionID, "ses-other");
+  });
+
+  void it("refuses to overwrite a pipeline run state", () => {
+    const dir = tempDir();
+    const runDir = path.join(dir, ".deus", "runs", "run-pipeline1");
+    fs.mkdirSync(runDir, { recursive: true });
+    const file = path.join(runDir, "run.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ version: 1, runId: "run-pipeline1", pipeline: "build", workDir: dir, steps: [] }),
+      "utf-8",
+    );
+
+    assert.throws(
+      () => recordStepSession(dir, "run-pipeline1", { stepId: "bt-1", sessionID: "ses-x", agent: "build" }),
+      /belongs to a pipeline run/,
+    );
+    const kept = JSON.parse(fs.readFileSync(file, "utf-8")) as { pipeline?: string };
+    assert.equal(kept.pipeline, "build");
+  });
+
+  void it("ignores an empty session id instead of writing a hole", () => {
+    const dir = tempDir();
+    recordStepSession(dir, "run-team03", { stepId: "bt-1", sessionID: "  ", agent: "build" });
+
+    assert.equal(resolveTaskSession(dir, "run-team03/bt-1"), undefined);
   });
 });

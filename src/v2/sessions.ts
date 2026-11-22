@@ -537,6 +537,58 @@ export function resolveTaskSession(
   return undefined;
 }
 
+/**
+ * Records the session of a run step so `resolveTaskSession` can find it later
+ * (a rework wakes the agent that wrote the code). The file is the same shape
+ * `pipeline.ts` writes; a full pipeline run state is never overwritten.
+ */
+export function recordStepSession(
+  projectDir: string,
+  runId: string,
+  step: { stepId: string; sessionID: string; agent: string },
+): void {
+  if (step.sessionID.trim().length === 0) return;
+
+  const runDir = runDirFor(projectDir, runId);
+  const file = `${runDir}/run.json`;
+  fs.mkdirSync(runDir, { recursive: true });
+
+  let steps: Array<Record<string, unknown>> = [];
+  if (fs.existsSync(file)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(file, "utf-8")) as {
+        pipeline?: unknown;
+        workDir?: unknown;
+        steps?: unknown;
+      };
+      if (existing.pipeline !== undefined || existing.workDir !== undefined) {
+        throw new Error(
+          `run ${runId} belongs to a pipeline run; refusing to overwrite its state`,
+        );
+      }
+      if (Array.isArray(existing.steps)) {
+        steps = existing.steps as Array<Record<string, unknown>>;
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("belongs to a pipeline")) {
+        throw error;
+      }
+      // A truncated file is replaced: it cannot be trusted anyway.
+      steps = [];
+    }
+  }
+
+  steps.push({ stepId: step.stepId, sessionID: step.sessionID, agent: step.agent });
+
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(
+    tmp,
+    `${JSON.stringify({ version: 1, steps }, null, 2)}\n`,
+    "utf-8",
+  );
+  fs.renameSync(tmp, file);
+}
+
 export interface MessageTaskInput {
   taskId: string;
   executionRef: string;

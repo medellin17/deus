@@ -736,6 +736,9 @@ class SqliteBoard implements Board {
         )
         .run(reason, now, taskId);
       this.recordEvent(row.team_id, taskId, "task/blocked", actor, { reason });
+      // A blocked task no longer waits for a review decision; the blocked event
+      // below is the one the lead must see.
+      cancelTaskWakes(this.db, taskId, "blocked");
       enqueueTransitionWake(this.db, this.projectDir, {
         teamId: row.team_id,
         taskId,

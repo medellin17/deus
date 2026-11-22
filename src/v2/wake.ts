@@ -438,6 +438,23 @@ class SqliteWake implements WakeQueue {
 
     return this.write(() => {
       const now = nowIso();
+      // A task may be closed (accepted or cancelled) between enqueue and the
+      // wave, for example by the lead while the event sat in backoff. Waking
+      // someone about it would ask for a decision that is already made.
+      this.db
+        .prepare(
+          `UPDATE wake_events
+              SET status = 'cancelled', outcome = 'task closed',
+                  claim_token = NULL, lease_until = NULL
+            WHERE status = 'pending' AND board_task_id IS NOT NULL
+              AND (lease_until IS NULL OR lease_until < ?)
+              AND board_task_id IN (
+                SELECT board_task_id FROM board_tasks
+                 WHERE status IN ('done', 'cancelled')
+              )`,
+        )
+        .run(now);
+
       // Overdue events are closed instead of delivered late. An event that is
       // being delivered right now has a live lease and is left alone.
       this.db

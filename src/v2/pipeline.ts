@@ -92,6 +92,13 @@ export function loadRunState(projectDir: string, runId: string): RunState {
   if (state.version !== 1) {
     throw new Error(`unsupported checkpoint version: ${state.version}`);
   }
+  // A team run writes the same file with only `steps`; resuming it as a
+  // pipeline run would fail later with a confusing TypeError.
+  if (typeof state.workDir !== "string" || typeof state.pipeline !== "string") {
+    throw new Error(
+      `checkpoint ${runId} belongs to a team run, not a pipeline; --resume cannot continue it`,
+    );
+  }
   return state;
 }
 

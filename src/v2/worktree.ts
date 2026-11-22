@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
+
 import fs from "node:fs";
 import path from "node:path";
+
+import { pruneWorktrees } from "./gitflow.ts";
 
 export interface PreparedWorkdir {
   workDir: string;
@@ -116,6 +119,13 @@ export function prepareWorkdir(
   }
 
   try {
+    // A directory removed by hand (or by a crash) leaves an administrative entry
+    // that makes `worktree add` fail on an otherwise free path.
+    try {
+      pruneWorktrees(repoRoot);
+    } catch {
+      // best-effort; `add` below reports the real problem
+    }
     git(repoRoot, ["worktree", "add", "--detach", workDir, "HEAD"]);
   } catch (error) {
     throw new Error(
@@ -131,6 +141,10 @@ export function prepareWorkdir(
 }
 
 export function removeWorkdir(projectDir: string, workDir: string): void {
+  // `prepareWorkdir` falls back to the project itself when git is unreadable.
+  // Removing that path would delete the repository.
+  if (path.resolve(workDir) === path.resolve(projectDir)) return;
+
   try {
     const repoRoot = git(projectDir, ["rev-parse", "--show-toplevel"]);
     git(repoRoot, ["worktree", "remove", "--force", workDir]);

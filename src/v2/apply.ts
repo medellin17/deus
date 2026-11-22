@@ -3,6 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { applyBaseline, runGate } from "./gate.ts";
+import {
+  attemptMerge,
+  branchExists,
+  branchHead,
+  commitWorktree,
+  conflictedFiles,
+  ignoredChangedPaths,
+  listFiles,
+  recoverUnfinishedMerge,
+  shortHead,
+} from "./gitflow.ts";
 import type {
   ApplyResult,
   CheckCommand,
@@ -36,43 +47,6 @@ function git(cwd: string, args: string[]) {
   });
 }
 
-/** Secret-like paths that must never be committed from a run worktree. */
-function isSecretPath(file: string): boolean {
-  const segments = file.split("/");
-  const base = segments[segments.length - 1] ?? file;
-  const parents = segments.slice(0, -1);
-
-  if (base === ".ssh" || base === ".aws" || base === ".gnupg") return true;
-  if (parents.some((p) => p === ".ssh" || p === ".aws" || p === ".gnupg")) return true;
-  if (base === ".envrc" || base === "id_rsa" || base === "id_ed25519") return true;
-  if (/\.(?:pem|key|p12|pfx)$/i.test(base)) return true;
-  if (base !== ".env.example" && /\.env(?:\.|$)/i.test(base)) return true;
-  return false;
-}
-
-function stagedSecretPaths(workDir: string): string[] {
-  return listFiles(workDir, ["diff", "--cached", "--name-only"]).filter(isSecretPath);
-}
-
-/** Short HEAD hash, or undefined when git cannot read it (non-fatal). */
-function shortHead(cwd: string): string | undefined {
-  const head = git(cwd, ["rev-parse", "--short", "HEAD"]);
-  return head.status === 0 ? head.stdout.trim() : undefined;
-}
-
-function listFiles(cwd: string, args: string[]): string[] {
-  const result = git(cwd, args);
-  if (result.status !== 0) return [];
-  return (result.stdout ?? "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-function conflictedFiles(projectDir: string): string[] {
-  return listFiles(projectDir, ["diff", "--name-only", "--diff-filter=U"]);
-}
-
 function modifiedFiles(projectDir: string): string[] {
   return listFiles(projectDir, ["diff", "--name-only", "HEAD"]);
 }
@@ -84,29 +58,6 @@ function hasConflictMarkers(filePath: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Git happily overwrites ignored files during a merge. Refuse to merge when
- * the branch touches a path that is ignored in the main project.
- */
-function ignoredChangedPaths(
-  projectDir: string,
-  baseCommit: string,
-  branch: string,
-): string[] {
-  const files = listFiles(projectDir, [
-    "diff",
-    "--name-only",
-    `${baseCommit}..${branch}`,
-  ]);
-
-  return files.filter((file) => {
-    const tracked = git(projectDir, ["ls-files", "--error-unmatch", "--", file]);
-    if (tracked.status === 0) return false;
-
-    return git(projectDir, ["check-ignore", "-q", "--no-index", "--", file]).status === 0;
-  });
 }
 
 export interface ConflictResolverOptions {
@@ -336,9 +287,6 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
   const branch = `deus/${state.runId}`;
   const mergeCommand = `git -C "${projectDir}" merge --no-ff ${branch}`;
   const title = shortTask(state.task);
-  const branchExists =
-    git(projectDir, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0;
-
   const message = [
     `deus: ${title}`,
     "",
@@ -357,147 +305,38 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
   });
 
   let commitHash: string | undefined;
-  let worktreeClean = false;
 
-  const worktreeStatus = git(workDir, ["status", "--porcelain"]);
-  if (worktreeStatus.status !== 0) {
-    return { status: "skipped", reason: "cannot read worktree status" };
-  }
-  worktreeClean = !(worktreeStatus.stdout ?? "").trim();
-
-  if (branchExists) {
-    const head = git(projectDir, ["rev-parse", "--short", branch]);
-    commitHash = head.status === 0 ? head.stdout.trim() : undefined;
-  }
-
-  if (branchExists) {
-    const mergeHead = git(projectDir, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
-    if (mergeHead.status === 0) {
-      const mergeSource = (mergeHead.stdout ?? "").trim();
-      const branchRef = git(projectDir, ["rev-parse", branch]);
-      if (branchRef.status !== 0) {
-        return {
-          status: "skipped",
-          reason: `cannot resolve run branch: ${(branchRef.stderr || branchRef.stdout).trim()}`,
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
-      const branchCommit = branchRef.stdout.trim();
-
-      if (mergeSource === branchCommit) {
-        const abort = git(projectDir, ["merge", "--abort"]);
-        if (abort.status !== 0) {
-          return {
-            status: "skipped",
-            reason: `cannot abort unfinished merge: ${(abort.stderr || abort.stdout).trim()}`,
-            branch,
-            commit: commitHash,
-            mergeCommand,
-          };
-        }
-      } else {
-        return {
-          status: "skipped",
-          reason: "project has an unfinished merge from another source",
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
+  const known = branchExists(projectDir, branch);
+  if (known) {
+    commitHash = branchHead(projectDir, branch);
+    // Must run before any early return: an unfinished merge from a previous
+    // attempt of this branch has to be cleared even if the run cannot continue.
+    const recovered = recoverUnfinishedMerge(projectDir, branch);
+    if (!recovered.ok) {
+      return {
+        status: "skipped",
+        reason: recovered.reason ?? "unfinished merge",
+        branch,
+        commit: commitHash,
+        mergeCommand,
+      };
     }
   }
 
-  if (branchExists) {
-    if (!worktreeClean) {
-      const worktreeBranch = git(workDir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-      if (worktreeBranch.status !== 0 || (worktreeBranch.stdout ?? "").trim() !== branch) {
-        return {
-          status: "skipped",
-          reason: "worktree is not on the run branch",
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
-
-      // Finish the commit that was interrupted on a previous attempt.
-      const staged = git(workDir, ["add", "-A"]);
-      if (staged.status !== 0) {
-        return {
-          status: "skipped",
-          reason: `git add failed: ${(staged.stderr || staged.stdout).trim()}`,
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
-      const secrets = stagedSecretPaths(workDir);
-      if (secrets.length > 0) {
-        return {
-          status: "skipped",
-          reason: `refusing to commit secret-like files: ${secrets.slice(0, 5).join(", ")}`,
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
-      const commit = git(workDir, ["commit", "-m", message]);
-      if (commit.status !== 0) {
-        return {
-          status: "skipped",
-          reason: `commit failed: ${(commit.stderr || commit.stdout).trim()}`,
-          branch,
-          commit: commitHash,
-          mergeCommand,
-        };
-      }
-      const head = git(workDir, ["rev-parse", "--short", "HEAD"]);
-      commitHash = head.status === 0 ? head.stdout.trim() : undefined;
-      worktreeClean = true;
-    }
-  } else {
-    if (worktreeClean) {
-      return { status: "no-changes" };
-    }
-
-    const switchResult = git(workDir, ["switch", "-c", branch]);
-    if (switchResult.status !== 0) {
-      return {
-        status: "skipped",
-        reason: `cannot create branch: ${(switchResult.stderr || switchResult.stdout).trim()}`,
-      };
-    }
-
-    const staged = git(workDir, ["add", "-A"]);
-    if (staged.status !== 0) {
-      return {
-        status: "skipped",
-        reason: `git add failed: ${(staged.stderr || staged.stdout).trim()}`,
-      };
-    }
-
-    const secrets = stagedSecretPaths(workDir);
-    if (secrets.length > 0) {
-      return {
-        status: "skipped",
-        reason: `refusing to commit secret-like files: ${secrets.slice(0, 5).join(", ")}`,
-      };
-    }
-
-    const commit = git(workDir, ["commit", "-m", message]);
-    if (commit.status !== 0) {
-      return {
-        status: "skipped",
-        reason: `commit failed: ${(commit.stderr || commit.stdout).trim()}`,
-      };
-    }
-
-    const head = git(workDir, ["rev-parse", "--short", "HEAD"]);
-    commitHash = head.status === 0 ? head.stdout.trim() : undefined;
-    worktreeClean = true;
+  const committed = commitWorktree({ projectDir, workDir, branch, message });
+  if (committed.status === "skipped") {
+    return {
+      status: "skipped",
+      reason: committed.reason ?? "commit failed",
+      branch,
+      commit: committed.commit ?? commitHash,
+      mergeCommand,
+    };
   }
+  if (committed.status === "no-changes") {
+    return { status: "no-changes" };
+  }
+  commitHash = committed.commit ?? commitHash;
 
   if (!options.merge) {
     return branchResult("auto-merge is disabled");
@@ -519,7 +358,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
   }
   const branchCommits = Number((counted.stdout ?? "").trim());
 
-  if (branchExists && branchCommits === 0) {
+  if (known && branchCommits === 0) {
     return {
       status: "skipped",
       reason: "branch has no commits",
@@ -529,7 +368,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     };
   }
 
-  if (branchExists) {
+  if (known) {
     const merged = git(projectDir, ["merge-base", "--is-ancestor", branch, "HEAD"]);
     if (merged.status === 0) {
       return {
@@ -577,19 +416,19 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     );
   }
 
-  const merge = git(projectDir, [
-    "merge",
-    "--no-ff",
+  const merge = attemptMerge({
+    projectDir,
     branch,
-    "-m",
-    `Merge deus ${state.runId}: ${title}`,
-  ]);
+    runId: state.runId,
+    title,
+    abortOnConflict: false,
+  });
 
-  if (merge.status === 0) {
+  if (merge.status === "merged") {
     return {
       status: "merged",
       branch,
-      commit: shortHead(projectDir),
+      commit: merge.commit ?? shortHead(projectDir),
       mergeCommand,
     };
   }
@@ -633,6 +472,5 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     };
   }
 
-  const details = (merge.stderr || merge.stdout).trim().split("\n").slice(-3).join(" ");
-  return branchResult(`merge failed: ${details}`);
+  return branchResult(merge.reason ?? "merge failed");
 }

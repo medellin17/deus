@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +21,7 @@ import {
 } from "./pipeline.ts";
 import { generatePlan, planToSteps, validatePlan } from "./planner.ts";
 import { getPipeline } from "./pipelines.ts";
+import { runCodingTeam, teamExitCode, TeamError } from "./team.ts";
 import {
   isWakeDisabled,
   leadSessionFile,
@@ -85,6 +87,10 @@ interface CliOptions {
   teamName?: string;
   teamGoal?: string;
   teamLead?: string;
+  teamRun: boolean;
+  teamParallel?: number;
+  teamTasks?: string;
+  teamKeepWorktrees: boolean;
   direct: boolean;
   agent?: string;
   planOnly: boolean;
@@ -117,6 +123,10 @@ Options:
   --wake               Deliver one wave of pending wake events and exit
   --wake-status        Print the wake outbox and exit (read-only)
   --team-add           Create a team (--team-name, --team-goal, --team-lead)
+  --team-run           Run the team's ready tasks in parallel worktrees
+  --team-parallel <n>  Agents at once for --team-run (default: 3, max 8)
+  --team-tasks <ids>   Comma-separated board task ids for --team-run
+  --team-keep-worktrees Keep worktrees and branches after a successful merge
   --board-task <act>   Board mutation: add|claim|start|submit|accept|rework|retry|block|cancel
   --board-id <id>      Task id for --board-task
   --board-actor <name> Who performs the mutation (default: main)
@@ -174,6 +184,8 @@ function parseArgs(argv: string[]): CliOptions {
     wake: false,
     wakeStatus: false,
     boardActor: "main",
+    teamRun: false,
+    teamKeepWorktrees: false,
     direct: false,
     planOnly: false,
     task: "",
@@ -321,6 +333,21 @@ function parseArgs(argv: string[]): CliOptions {
       case "--team-add":
         options.teamAdd = true;
         break;
+      case "--team-run":
+        options.teamRun = true;
+        break;
+      case "--team-parallel":
+        options.teamParallel = Number(next());
+        if (!Number.isInteger(options.teamParallel) || options.teamParallel < 1) {
+          throw new CliInputError("--team-parallel must be a positive integer");
+        }
+        break;
+      case "--team-tasks":
+        options.teamTasks = next();
+        break;
+      case "--team-keep-worktrees":
+        options.teamKeepWorktrees = true;
+        break;
       case "--team-name":
         options.teamName = next();
         break;
@@ -400,6 +427,71 @@ function parseArgs(argv: string[]): CliOptions {
   }
   if (options.smoke && options.boardTask !== undefined) {
     throw new CliInputError("--smoke cannot be combined with --board-task");
+  }
+  if (options.teamRun) {
+    const together: Array<[boolean, string]> = [
+      [options.teamAdd === true, "--team-add"],
+      [options.board, "--board"],
+      [options.boardTask !== undefined, "--board-task"],
+      [options.wake, "--wake"],
+      [options.wakeStatus, "--wake-status"],
+      [options.wakeRegister !== undefined, "--wake-register"],
+      [options.smoke, "--smoke"],
+      [options.planOnly, "--plan-only"],
+      [options.fromPlan !== undefined, "--from-plan"],
+      [options.resume !== undefined, "--resume"],
+      [options.task.length > 0, "a positional task"],
+      [!options.gate, "--no-gate"],
+      [options.mergeExplicit, "--merge/--no-merge"],
+      [options.maxCostExplicit, "--max-cost"],
+      [options.worktreeExplicit, "--worktree/--no-worktree"],
+      [options.baselineExplicit, "--baseline/--no-baseline"],
+      [options.pipelineExplicit, "--pipeline"],
+      [options.direct, "--direct"],
+      [options.cleanup, "--cleanup"],
+      [options.json, "--json"],
+      [options.policy !== undefined, "--policy"],
+    ];
+    for (const [present, flag] of together) {
+      if (present) {
+        throw new CliInputError(`--team-run cannot be combined with ${flag}`);
+      }
+    }
+    if (options.teamName === undefined) {
+      throw new CliInputError("--team-run requires --team-name");
+    }
+    if (options.teamParallel !== undefined && options.teamParallel > 8) {
+      throw new CliInputError("--team-parallel must not exceed 8");
+    }
+  }
+  if (!options.teamRun) {
+    const strays: Array<[boolean, string]> = [
+      [options.teamTasks !== undefined, "--team-tasks"],
+      [options.teamParallel !== undefined, "--team-parallel"],
+      [options.teamKeepWorktrees, "--team-keep-worktrees"],
+    ];
+    for (const [present, flag] of strays) {
+      if (present) throw new CliInputError(`${flag} is only valid with --team-run`);
+    }
+  }
+  if (!options.teamRun && options.teamAdd !== true) {
+    const strays: Array<[boolean, string]> = [
+      [options.teamName !== undefined, "--team-name"],
+      [options.teamGoal !== undefined, "--team-goal"],
+      [options.teamLead !== undefined, "--team-lead"],
+    ];
+    for (const [present, flag] of strays) {
+      if (present) throw new CliInputError(`${flag} is only valid with --team-add or --team-run`);
+    }
+  }
+  if (options.teamRun && options.teamTasks !== undefined) {
+    const ids = options.teamTasks
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (ids.length === 0) {
+      throw new CliInputError("--team-tasks must list at least one board task id");
+    }
   }
   return options;
 }
@@ -997,6 +1089,77 @@ function runBoardTask(projectDir: string, options: CliOptions): number {
   }
 }
 
+
+async function runTeam(signal: AbortSignal, options: CliOptions): Promise<number> {
+  const projectDir = path.resolve(options.cwd);
+  const teamName = options.teamName as string;
+  const config = loadConfig(projectDir);
+  const checks = resolveChecks(config, projectDir);
+  const board = openBoard(projectDir);
+
+  try {
+    const team = board.getTeamByName(teamName);
+    if (!team) {
+      throw new TeamError("not_found", `team not found: ${teamName}`);
+    }
+
+    const client = await createOpenCodeClient();
+    // Two runs started in the same millisecond would share a directory, a
+    // worktree and a branch. Make the id unique before anything uses it.
+    let runId = makeRunId();
+    while (fs.existsSync(runDirFor(projectDir, runId))) {
+      runId = `${makeRunId()}${crypto.randomBytes(2).toString("hex")}`;
+    }
+    const result = await runCodingTeam(client, board, {
+      projectDir,
+      teamId: team.teamId,
+      runId,
+      model: options.model,
+      checks,
+      actor: options.boardActor,
+      agent: options.agent ?? "build",
+      maxParallel: options.teamParallel,
+      timeoutMs: options.timeoutSeconds * 1_000,
+      keepWorktrees: options.teamKeepWorktrees,
+      taskIds: options.teamTasks
+        ?.split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+      signal,
+      onProgress: (line) => log(`team: ${line}`),
+    });
+
+    for (const task of result.tasks) {
+      const details = [
+        `task: ${task.boardTaskId}`,
+        task.status,
+        `status: ${task.boardStatus ?? "-"}`,
+        task.branch ? `branch: ${task.branch}` : undefined,
+        task.commit ? `commit: ${task.commit}` : undefined,
+        task.gate ? `gate: ${task.gate.status}` : undefined,
+        task.reason ? `reason: ${task.reason}` : undefined,
+        task.cost !== undefined ? `cost=~$${task.cost.toFixed(4)}` : undefined,
+      ].filter(Boolean);
+      console.log(details.join(" "));
+    }
+    console.log(
+      `team: merged=${result.merged} review=${result.review} blocked=${result.blocked} ` +
+        `errors=${result.errors} skipped=${result.skipped} cost=~$${result.cost.toFixed(4)} ` +
+        `run=${result.runId}`,
+    );
+
+    return teamExitCode(result);
+  } catch (error) {
+    if (error instanceof TeamError) {
+      console.error(`error: ${error.code}: ${error.message}`);
+      return 1;
+    }
+    throw error;
+  } finally {
+    board.close();
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -1013,6 +1176,11 @@ async function main(): Promise<void> {
 
   if (options.smoke) {
     process.exitCode = await runSmoke(options, controller.signal);
+    return;
+  }
+
+  if (options.teamRun) {
+    process.exitCode = await runTeam(controller.signal, options);
     return;
   }
 

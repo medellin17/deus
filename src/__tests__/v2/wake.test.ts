@@ -543,6 +543,30 @@ void describe("wake outbox", () => {
     assert.equal(queue.stats().delivered, 1);
   });
 
+  void it("cancels a pending wake for a task that is already closed", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const taskId = submitTask(board, dir);
+    board.accept(taskId, "main");
+
+    // A late event for the same task: enqueued after the decision was made.
+    const queue = newWake(dir);
+    queue.enqueue({
+      dedupKey: "late",
+      teamId: "t",
+      boardTaskId: taskId,
+      eventType: "task/review-ready",
+      recipient: { sessionID: "ses-lead" },
+    });
+    assert.equal(queue.stats().pending, 1);
+
+    assert.equal(queue.claim(), null);
+    assert.equal(queue.stats().pending, 0);
+    const late = queue.list({ limit: 5 }).find((event) => event.dedupKey === "late");
+    assert.equal(late?.status, "cancelled");
+    assert.equal(late?.outcome, "task closed");
+  });
+
   void it("prunes terminal wake events", async () => {
     const { board, dir } = newBoard();
     registerLeadSession(dir, "ses-lead");
