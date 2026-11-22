@@ -24,7 +24,7 @@ export const DEFAULT_COALESCE_MS = 30_000;
 const MAX_BATCH = 10;
 
 export type WakeStatus = "pending" | "delivered" | "failed" | "expired" | "cancelled";
-export type WakeEventType = "task/review-ready" | "task/blocked";
+export type WakeEventType = "task/review-ready" | "task/blocked" | "task/rework";
 
 export interface WakeEvent {
   wakeEventId: string;
@@ -315,6 +315,8 @@ export interface TransitionWakeInput {
   taskId: string;
   attempt: number;
   eventType: WakeEventType;
+  /** Defaults to the team lead; a rework goes to the task's own session. */
+  recipient?: SessionAddress;
   title: string;
   status: string;
   payload?: Record<string, unknown>;
@@ -335,7 +337,7 @@ export function enqueueTransitionWake(
   projectDir: string,
   input: TransitionWakeInput,
 ): void {
-  const recipient = readLeadSession(projectDir);
+  const recipient = input.recipient ?? readLeadSession(projectDir);
   const note = recipient ? null : "no recipient session";
 
   const now = nowIso();
@@ -832,6 +834,7 @@ function renderWake(events: WakeEvent[]): string {
     const title = payloadField(event.payload, "title") ?? event.boardTaskId ?? "untitled";
     const status = payloadField(event.payload, "status");
     const summary = payloadField(event.payload, "summary");
+    const note = payloadField(event.payload, "note");
     const verification = event.payload as { verification?: { status?: string } } | undefined;
     const gate = verification?.verification?.status;
 
@@ -839,12 +842,21 @@ function renderWake(events: WakeEvent[]): string {
       status ? `status: ${status}` : undefined,
       gate ? `gate: ${gate}` : undefined,
       summary ? `summary: ${summary}` : undefined,
+      note ? `note: ${note}` : undefined,
     ].filter(Boolean);
 
     lines.push(`- ${event.eventType} ${event.boardTaskId ?? "-"} "${title}"`);
     if (details.length > 0) lines.push(`  ${details.join(", ")}`);
   }
-  lines.push("", "Reply with a decision (accept | rework | retry).");
+  const types = new Set(events.map((event) => event.eventType));
+  const footer =
+    types.size === 1 && events[0].eventType === "task/rework"
+      ? "Do the requested work, then submit it again."
+      : types.size === 1 && events[0].eventType === "task/blocked"
+        ? "Decide how to unblock: retry | cancel."
+        : "Reply with a decision (accept | rework | retry).";
+
+  lines.push("", footer);
   return lines.join("\n");
 }
 

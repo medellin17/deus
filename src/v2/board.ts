@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import type Database from "better-sqlite3";
 
+import { resolveTaskSession } from "./sessions.ts";
 import { openStore, openStoreReadonly } from "./store.ts";
 import { enqueueTransitionWake, cancelTaskWakes } from "./wake.ts";
 
@@ -145,7 +146,8 @@ export interface Board {
     result: SubmitResult,
   ): void;
   accept(taskId: string, actor: string): void;
-  rework(taskId: string, actor: string): void;
+  /** Returns a task for rework; the note is delivered to the task's session. */
+  rework(taskId: string, actor: string, note?: string): void;
   block(taskId: string, actor: string, reason: string, claimToken?: string): void;
   retry(taskId: string, actor: string): void;
   cancel(taskId: string, actor: string, claimToken?: string): void;
@@ -661,7 +663,8 @@ class SqliteBoard implements Board {
     });
   }
 
-  rework(taskId: string, actor: string): void {
+  rework(taskId: string, actor: string, note?: string): void {
+    const cleanNote = note?.trim() ? note.trim() : undefined;
     this.write(() => {
       const row = this.mustTaskRow(taskId);
       this.assertTeamActive(row.team_id);
@@ -683,8 +686,25 @@ class SqliteBoard implements Board {
             WHERE board_task_id = ?`,
         )
         .run(now, taskId);
-      this.recordEvent(row.team_id, taskId, "task/reworked", actor, {});
+      this.recordEvent(row.team_id, taskId, "task/reworked", actor, { note: cleanNote });
       cancelTaskWakes(this.db, taskId, "reworked");
+
+      // Wake the executor itself: it is the one who has to act on the note.
+      const address = row.execution_ref
+        ? resolveTaskSession(this.projectDir, row.execution_ref)
+        : undefined;
+      if (address) {
+        enqueueTransitionWake(this.db, this.projectDir, {
+          teamId: row.team_id,
+          taskId,
+          attempt: row.attempt + 1,
+          eventType: "task/rework",
+          recipient: address,
+          title: row.title,
+          status: "rework",
+          payload: { note: cleanNote, previousStatus: row.status },
+        });
+      }
     });
   }
 

@@ -58,6 +58,18 @@ function submitTask(board: Board, dir: string, executionRef?: string): string {
   return task.boardTaskId;
 }
 
+
+function writeRun(dir: string, runId: string, stepId: string, sessionID: string): string {
+  const runDir = path.join(dir, ".deus", "runs", runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDir, "run.json"),
+    JSON.stringify({ version: 1, steps: [{ stepId, sessionID, agent: "build" }] }),
+    "utf-8",
+  );
+  return `${runId}/${stepId}`;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -72,7 +84,7 @@ interface FakeOptions {
 }
 
 function fakeClient(options: FakeOptions = {}) {
-  const calls = { prompt: [] as string[], get: 0 };
+  const calls = { prompt: [] as string[], promptSessions: [] as string[], get: 0 };
   let cost = options.cost ?? 0.1;
 
   const client = {
@@ -91,9 +103,10 @@ function fakeClient(options: FakeOptions = {}) {
           tokens: { input: tokenValue, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
         };
       },
-      prompt: async (input: { text: string }) => {
+      prompt: async (input: { text: string; sessionID: string }) => {
         if (options.failPrompt) throw new Error("prompt rejected");
         calls.prompt.push(input.text);
+        calls.promptSessions.push(input.sessionID);
         return {
           id: `u-${calls.prompt.length}`,
           sessionID: "ses-1",
@@ -403,6 +416,91 @@ void describe("wake outbox", () => {
     raw.close();
 
     assert.equal(openWakeReadonly(dir), undefined);
+  });
+
+  void it("wakes the task's own session when the lead asks for rework", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const ref = writeRun(dir, "run-rework", "fix", "ses-worker");
+    const taskId = submitTask(board, dir, ref);
+    const queue = newWake(dir);
+
+    board.rework(taskId, "main", "add line numbers");
+
+    const events = queue.list({ limit: 20 });
+    const review = events.find((event) => event.eventType === "task/review-ready");
+    const rework = events.find((event) => event.eventType === "task/rework");
+
+    assert.equal(review?.status, "cancelled");
+    assert.ok(rework, "a rework event should exist");
+    assert.equal(rework.recipient.sessionID, "ses-worker");
+    assert.equal(rework.attempts, 0);
+    assert.deepEqual(
+      (rework.payload as { note?: string }).note,
+      "add line numbers",
+    );
+  });
+
+  void it("drops a blank rework note instead of sending an empty line", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const ref = writeRun(dir, "run-blank", "fix", "ses-worker");
+    const taskId = submitTask(board, dir, ref);
+    const queue = newWake(dir);
+
+    board.rework(taskId, "main", "   ");
+
+    const rework = queue.list({ limit: 20 }).find((event) => event.eventType === "task/rework");
+    assert.ok(rework);
+    assert.equal((rework.payload as { note?: string }).note, undefined);
+  });
+
+  void it("does not enqueue a rework event without a resolvable session", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const taskId = submitTask(board, dir); // fake execution_ref, no run.json
+    const queue = newWake(dir);
+
+    board.rework(taskId, "main", "try again");
+
+    assert.equal(queue.list({ limit: 20 }).filter((event) => event.eventType === "task/rework").length, 0);
+  });
+
+  void it("keeps one rework event per attempt", () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const firstRef = writeRun(dir, "run-r1", "fix", "ses-worker");
+    const taskId = submitTask(board, dir, firstRef);
+    const queue = newWake(dir);
+
+    board.rework(taskId, "main", "round two");
+
+    const secondRef = writeRun(dir, "run-r2", "fix", "ses-worker");
+    const claim = board.claim(taskId, "main");
+    assert.ok(claim);
+    board.start(taskId, claim.claimToken, secondRef);
+    board.submit(taskId, claim.claimToken, { status: "passed" }, { summary: "again" });
+    board.rework(taskId, "main", "round three");
+
+    const rewakes = queue.list({ limit: 20 }).filter((event) => event.eventType === "task/rework");
+    assert.equal(rewakes.length, 2);
+  });
+
+  void it("delivers the rework note to the worker session", async () => {
+    const { board, dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const ref = writeRun(dir, "run-note", "fix", "ses-worker");
+    const taskId = submitTask(board, dir, ref);
+    const queue = newWake(dir);
+    board.rework(taskId, "main", "cite line numbers");
+
+    const { client, calls } = fakeClient();
+    const result = await runWave(client, queue, { maxSteps: 1 });
+
+    assert.equal(result.delivered, 1);
+    assert.match(calls.prompt[0], /cite line numbers/);
+    assert.match(calls.prompt[0], /Do the requested work/);
+    assert.deepEqual(calls.promptSessions, ["ses-worker"]);
   });
 
   void it("cancels a pending wake when the task is accepted", () => {
@@ -783,6 +881,33 @@ void describe("runWave", () => {
     await runWave(client, queue, { maxSteps: 1, coalesceMs: 0 });
 
     assert.ok(Math.abs(queue.stats().knownCost - 0.15) < 1e-9, `cost=${queue.stats().knownCost}`);
+  });
+
+  void it("keeps the decision footer for a mixed batch", async () => {
+    const { dir } = newBoard();
+    registerLeadSession(dir, "ses-lead");
+    const queue = newWake(dir);
+    queue.enqueue({
+      dedupKey: "review",
+      teamId: "t",
+      eventType: "task/review-ready",
+      recipient: { sessionID: "ses-lead" },
+      payload: { title: "review me" },
+    });
+    queue.enqueue({
+      dedupKey: "blocked",
+      teamId: "t",
+      eventType: "task/blocked",
+      recipient: { sessionID: "ses-lead" },
+      payload: { title: "blocked one" },
+    });
+
+    const { client, calls } = fakeClient();
+    await runWave(client, queue, { maxSteps: 1, coalesceMs: 60_000 });
+
+    assert.equal(calls.prompt.length, 1);
+    assert.match(calls.prompt[0], /Reply with a decision/);
+    assert.doesNotMatch(calls.prompt[0], /Do the requested work/);
   });
 
   void it("reports a dry run without sending anything", async () => {
