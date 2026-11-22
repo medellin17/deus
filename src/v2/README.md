@@ -371,6 +371,32 @@ git -C <project> diff <baseCommit>..deus/<runId>
 Имя команды уникально среди **активных**. После `closeTeam` имя освобождается, и при
 следующем открытии создаётся новый активный `main`.
 
+### Доска из CLI
+
+Читать — `--board`. Менять — `--board-task <действие>` с `--board-id`; актор по умолчанию
+`main` (`--board-actor`), а `assignee` при создании задаётся отдельно (`--board-assignee`).
+Вывод машинно-читаемый: `add` печатает `task: <id>`, остальные действия — `task: <id> status: <…>`,
+`claim` — `claim_token:` и `lease_until:`. Проигранная гонка за задачу — не ошибка:
+строка начинается с `claim: none`, exit 0.
+
+```bash
+deus --team-add --team-name research --team-goal "…"
+deus --board-task add --board-title "…" --board-goal "…" [--board-team main]
+deus --board-task claim --board-id bt-…
+deus --board-task start --board-id bt-… --board-token … --board-execution-ref run-…/step
+deus --board-task submit --board-id bt-… --board-token … --board-gate passed --board-summary "…"
+deus --board-task accept --board-id bt-…
+deus --board-task rework --board-id bt-… --board-note "что поправить"
+deus --board-task retry --board-id bt-…
+deus --board-task block --board-id bt-… --board-reason "…" [--board-token …]
+deus --board-task cancel --board-id bt-… [--board-token …]
+```
+
+`submit` требует явный `--board-gate`: доска не угадывает, прошли проверки или нет.
+Ошибка печатается как `error: <код>: <текст>` и даёт exit 1. Код есть у переходов доски
+(`invalid_transition`, `not_owner`, `verification_required`, `not_found`…) и у ошибок
+аргументов (`invalid_input`), так что агент-ведущий разбирает код, а не строку.
+
 ## Пробуждения (wake)
 
 Завершение задачи должно само доходить до того, кто обязан действовать. Outbox живёт в той

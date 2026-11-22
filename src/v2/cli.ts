@@ -65,6 +65,26 @@ interface CliOptions {
   wakeMaxSteps?: number;
   wakeMaxWallMs?: number;
   wakeCoalesceMs?: number;
+  boardTask?: string;
+  boardId?: string;
+  boardTitle?: string;
+  boardGoal?: string;
+  boardDoneWhen?: string;
+  boardTeam?: string;
+  boardActor?: string;
+  boardAssignee?: string;
+  boardToken?: string;
+  boardReason?: string;
+  boardNote?: string;
+  boardSummary?: string;
+  boardGate?: string;
+  boardExecutionRef?: string;
+  boardPriority?: number;
+  boardDependsOn?: string;
+  teamAdd?: boolean;
+  teamName?: string;
+  teamGoal?: string;
+  teamLead?: string;
   direct: boolean;
   agent?: string;
   planOnly: boolean;
@@ -96,6 +116,17 @@ Options:
   --board              Print the task board and exit (read-only)
   --wake               Deliver one wave of pending wake events and exit
   --wake-status        Print the wake outbox and exit (read-only)
+  --team-add           Create a team (--team-name, --team-goal, --team-lead)
+  --board-task <act>   Board mutation: add|claim|start|submit|accept|rework|retry|block|cancel
+  --board-id <id>      Task id for --board-task
+  --board-actor <name> Who performs the mutation (default: main)
+  --board-assignee <name> Optional assignee for "add" (default: unassigned)
+  --board-title/--board-goal/--board-done-when/--board-team  Fields for "add"
+  --board-token <tok>  Claim token for start|submit|block|cancel
+  --board-execution-ref <ref>  run-…/step-id for "start"
+  --board-summary <text> / --board-gate <passed|failed|skipped>  For "submit"
+  --board-reason <text> / --board-note <text>  For "block" / "rework"
+  --board-depends-on <ids> / --board-priority <n>  For "add".
   --wake-register <id> Record the team lead's session for wake delivery
   --wake-max-cost <usd>  Soft per-wave ceiling on reconciled cost (default: 1.00)
   --wake-max-steps <n>   Hard wave ceiling on delivered messages (default: 20)
@@ -142,6 +173,7 @@ function parseArgs(argv: string[]): CliOptions {
     board: false,
     wake: false,
     wakeStatus: false,
+    boardActor: "main",
     direct: false,
     planOnly: false,
     task: "",
@@ -153,7 +185,7 @@ function parseArgs(argv: string[]): CliOptions {
     const arg = argv[i];
     const next = (): string => {
       const value = argv[++i];
-      if (value === undefined) throw new Error(`missing value for ${arg}`);
+      if (value === undefined) throw new CliInputError(`missing value for ${arg}`);
       return value;
     };
 
@@ -179,14 +211,14 @@ function parseArgs(argv: string[]): CliOptions {
       case "--timeout":
         options.timeoutSeconds = Number(next());
         if (!Number.isFinite(options.timeoutSeconds) || options.timeoutSeconds <= 0) {
-          throw new Error("--timeout must be a positive number of seconds");
+          throw new CliInputError("--timeout must be a positive number of seconds");
         }
         options.timeoutExplicit = true;
         break;
       case "--max-cost":
         options.maxCost = Number(next());
         if (!Number.isFinite(options.maxCost) || options.maxCost < 0) {
-          throw new Error("--max-cost must be a non-negative number");
+          throw new CliInputError("--max-cost must be a non-negative number");
         }
         options.maxCostExplicit = true;
         break;
@@ -235,6 +267,69 @@ function parseArgs(argv: string[]): CliOptions {
       case "--wake":
         options.wake = true;
         break;
+      case "--board-task":
+        options.boardTask = next();
+        break;
+      case "--board-id":
+        options.boardId = next();
+        break;
+      case "--board-title":
+        options.boardTitle = next();
+        break;
+      case "--board-goal":
+        options.boardGoal = next();
+        break;
+      case "--board-done-when":
+        options.boardDoneWhen = next();
+        break;
+      case "--board-team":
+        options.boardTeam = next();
+        break;
+      case "--board-actor":
+        options.boardActor = next();
+        break;
+      case "--board-assignee":
+        options.boardAssignee = next();
+        break;
+      case "--board-token":
+        options.boardToken = next();
+        break;
+      case "--board-reason":
+        options.boardReason = next();
+        break;
+      case "--board-note":
+        options.boardNote = next();
+        break;
+      case "--board-summary":
+        options.boardSummary = next();
+        break;
+      case "--board-gate":
+        options.boardGate = next();
+        break;
+      case "--board-execution-ref":
+        options.boardExecutionRef = next();
+        break;
+      case "--board-priority":
+        options.boardPriority = Number(next());
+        if (!Number.isInteger(options.boardPriority)) {
+          throw new CliInputError("--board-priority must be an integer");
+        }
+        break;
+      case "--board-depends-on":
+        options.boardDependsOn = next();
+        break;
+      case "--team-add":
+        options.teamAdd = true;
+        break;
+      case "--team-name":
+        options.teamName = next();
+        break;
+      case "--team-goal":
+        options.teamGoal = next();
+        break;
+      case "--team-lead":
+        options.teamLead = next();
+        break;
       case "--wake-status":
         options.wakeStatus = true;
         break;
@@ -244,25 +339,25 @@ function parseArgs(argv: string[]): CliOptions {
       case "--wake-max-cost":
         options.wakeMaxCost = Number(next());
         if (!Number.isFinite(options.wakeMaxCost) || options.wakeMaxCost < 0) {
-          throw new Error("--wake-max-cost must be a non-negative number");
+          throw new CliInputError("--wake-max-cost must be a non-negative number");
         }
         break;
       case "--wake-max-steps":
         options.wakeMaxSteps = Number(next());
         if (!Number.isInteger(options.wakeMaxSteps) || options.wakeMaxSteps <= 0) {
-          throw new Error("--wake-max-steps must be a positive integer");
+          throw new CliInputError("--wake-max-steps must be a positive integer");
         }
         break;
       case "--wake-max-wall-ms":
         options.wakeMaxWallMs = Number(next());
         if (!Number.isFinite(options.wakeMaxWallMs) || options.wakeMaxWallMs <= 0) {
-          throw new Error("--wake-max-wall-ms must be a positive number");
+          throw new CliInputError("--wake-max-wall-ms must be a positive number");
         }
         break;
       case "--wake-coalesce-ms":
         options.wakeCoalesceMs = Number(next());
         if (!Number.isFinite(options.wakeCoalesceMs) || options.wakeCoalesceMs < 0) {
-          throw new Error("--wake-coalesce-ms must be a non-negative number");
+          throw new CliInputError("--wake-coalesce-ms must be a non-negative number");
         }
         break;
       case "--direct":
@@ -282,14 +377,29 @@ function parseArgs(argv: string[]): CliOptions {
         i = argv.length;
         break;
       default:
-        if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
+        if (arg.startsWith("-")) throw new CliInputError(`unknown option: ${arg}`);
         positional.push(arg);
     }
   }
 
   options.task = positional.join(" ").trim();
   if (options.wake && options.wakeRegister !== undefined) {
-    throw new Error("--wake-register cannot be combined with --wake");
+    throw new CliInputError("--wake-register cannot be combined with --wake");
+  }
+  if (options.board && options.boardTask !== undefined) {
+    throw new CliInputError("--board cannot be combined with --board-task");
+  }
+  if (options.teamAdd && options.boardTask !== undefined) {
+    throw new CliInputError("--team-add cannot be combined with --board-task");
+  }
+  if (options.teamAdd && options.board) {
+    throw new CliInputError("--team-add cannot be combined with --board");
+  }
+  if (options.boardTask !== undefined && options.task.length > 0) {
+    throw new CliInputError("--board-task does not take a positional task");
+  }
+  if (options.smoke && options.boardTask !== undefined) {
+    throw new CliInputError("--smoke cannot be combined with --board-task");
   }
   return options;
 }
@@ -711,6 +821,182 @@ function showWakeStatus(projectDir: string): number {
   }
 }
 
+
+class CliInputError extends Error {
+  readonly code = "invalid_input";
+}
+
+function actorName(value: string | undefined): string {
+  const actor = (value ?? "main").trim();
+  if (actor.length === 0) {
+    throw new CliInputError("--board-actor must not be empty");
+  }
+  return actor;
+}
+
+function requireOption(value: string | undefined, flag: string): string {
+  if (value === undefined || value.trim().length === 0) {
+    throw new CliInputError(`${flag} is required`);
+  }
+  return value;
+}
+
+function runTeamAdd(projectDir: string, options: CliOptions): number {
+  let board: Board | undefined;
+  try {
+    const name = requireOption(options.teamName, "--team-name");
+    const goal = requireOption(options.teamGoal, "--team-goal");
+    const leadAgent = actorName(options.teamLead ?? options.boardActor);
+    board = openBoard(projectDir);
+    const team = board.createTeam({ name, goal, leadAgent });
+    console.log(`team: ${team.teamId}`);
+    return 0;
+  } catch (error) {
+    return reportBoardError(error);
+  } finally {
+    board?.close();
+  }
+}
+
+function reportBoardError(error: unknown): number {
+  if (error instanceof BoardError) {
+    console.error(`error: ${error.code}: ${error.message}`);
+    return 1;
+  }
+  if (error instanceof CliInputError) {
+    console.error(`error: ${error.code}: ${error.message}`);
+    return 1;
+  }
+  throw error;
+}
+
+function runBoardTask(projectDir: string, options: CliOptions): number {
+  let board: Board | undefined;
+
+  try {
+    const action = requireOption(options.boardTask, "--board-task");
+    const actor = actorName(options.boardActor);
+    board = openBoard(projectDir);
+
+    switch (action) {
+      case "add": {
+        const teamName = options.boardTeam ?? "main";
+        const team = board.getTeamByName(teamName);
+        if (!team) throw new BoardError("not_found", `team not found: ${teamName}`);
+        const dependsOn = options.boardDependsOn
+          ? options.boardDependsOn
+              .split(",")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0)
+          : undefined;
+        const task = board.createTask({
+          teamId: team.teamId,
+          title: requireOption(options.boardTitle, "--board-title"),
+          goal: requireOption(options.boardGoal, "--board-goal"),
+          doneWhen: options.boardDoneWhen,
+          assignee:
+            options.boardAssignee === undefined
+              ? undefined
+              : requireOption(options.boardAssignee, "--board-assignee"),
+          priority: options.boardPriority,
+          dependsOn,
+          actor,
+        });
+        console.log(`task: ${task.boardTaskId}`);
+        return 0;
+      }
+
+      case "claim": {
+        const id = requireOption(options.boardId, "--board-id");
+        const claim = board.claim(id, actor);
+        if (!claim) {
+          console.log("claim: none (the task is already held)");
+          return 0;
+        }
+        console.log(`claim_token: ${claim.claimToken}`);
+        console.log(`lease_until: ${claim.leaseUntil}`);
+        return 0;
+      }
+
+      case "start": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.start(
+          id,
+          requireOption(options.boardToken, "--board-token"),
+          requireOption(options.boardExecutionRef, "--board-execution-ref"),
+        );
+        console.log(`task: ${id} status: running`);
+        return 0;
+      }
+
+      case "submit": {
+        const id = requireOption(options.boardId, "--board-id");
+        const gate = requireOption(options.boardGate, "--board-gate");
+        if (gate !== "passed" && gate !== "failed" && gate !== "skipped") {
+          throw new CliInputError("--board-gate must be passed, failed or skipped");
+        }
+        board.submit(
+          id,
+          requireOption(options.boardToken, "--board-token"),
+          { status: gate },
+          { summary: requireOption(options.boardSummary, "--board-summary") },
+        );
+        console.log(`task: ${id} status: review`);
+        return 0;
+      }
+
+      case "accept": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.accept(id, actor);
+        console.log(`task: ${id} status: done`);
+        return 0;
+      }
+
+      case "rework": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.rework(id, actor, options.boardNote);
+        console.log(`task: ${id} status: backlog`);
+        return 0;
+      }
+
+      case "retry": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.retry(id, actor);
+        console.log(`task: ${id} status: backlog`);
+        return 0;
+      }
+
+      case "block": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.block(
+          id,
+          actor,
+          requireOption(options.boardReason, "--board-reason"),
+          options.boardToken,
+        );
+        console.log(`task: ${id} status: blocked`);
+        return 0;
+      }
+
+      case "cancel": {
+        const id = requireOption(options.boardId, "--board-id");
+        board.cancel(id, actor, options.boardToken);
+        console.log(`task: ${id} status: cancelled`);
+        return 0;
+      }
+
+      default:
+        throw new CliInputError(
+          `unknown --board-task action: ${action} (add|claim|start|submit|accept|rework|retry|block|cancel)`,
+        );
+    }
+  } catch (error) {
+    return reportBoardError(error);
+  } finally {
+    board?.close();
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -727,6 +1013,16 @@ async function main(): Promise<void> {
 
   if (options.smoke) {
     process.exitCode = await runSmoke(options, controller.signal);
+    return;
+  }
+
+  if (options.teamAdd) {
+    process.exitCode = runTeamAdd(path.resolve(options.cwd), options);
+    return;
+  }
+
+  if (options.boardTask !== undefined) {
+    process.exitCode = runBoardTask(path.resolve(options.cwd), options);
     return;
   }
 
@@ -979,6 +1275,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+  const code = (error as { code?: unknown }).code;
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(typeof code === "string" ? `error: ${code}: ${message}` : `error: ${message}`);
   process.exitCode = 1;
 });
