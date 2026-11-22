@@ -20,6 +20,14 @@ import {
 } from "./pipeline.ts";
 import { generatePlan, planToSteps, validatePlan } from "./planner.ts";
 import { getPipeline } from "./pipelines.ts";
+import {
+  isWakeDisabled,
+  leadSessionFile,
+  openWake,
+  openWakeReadonly,
+  registerLeadSession,
+  runWave,
+} from "./wake.ts";
 import { loadRegistry, agentModel } from "./registry.ts";
 import type { ApplyResult, PipelineStepDef, PlanStep, RunState } from "./types.ts";
 import { prepareWorkdir, removeWorkdir } from "./worktree.ts";
@@ -50,6 +58,13 @@ interface CliOptions {
   json: boolean;
   smoke: boolean;
   board: boolean;
+  wake: boolean;
+  wakeStatus: boolean;
+  wakeRegister?: string;
+  wakeMaxCost?: number;
+  wakeMaxSteps?: number;
+  wakeMaxWallMs?: number;
+  wakeCoalesceMs?: number;
   direct: boolean;
   agent?: string;
   planOnly: boolean;
@@ -64,6 +79,8 @@ Usage:
   node --import tsx src/v2/cli.ts [options] "task"
   node --import tsx src/v2/cli.ts --smoke
   node --import tsx src/v2/cli.ts --board --cwd <project>
+  node --import tsx src/v2/cli.ts --wake --cwd <project>
+  node --import tsx src/v2/cli.ts --wake-status --cwd <project>
   node --import tsx src/v2/cli.ts --plan-only "task"
   node --import tsx src/v2/cli.ts --from-plan plan.json "task"
   node --import tsx src/v2/cli.ts --resume <runId> --cwd <project>
@@ -77,6 +94,13 @@ Options:
   --plan-only          Ask the planner for a plan and exit
   --from-plan <file>   Run a plan produced by --plan-only
   --board              Print the task board and exit (read-only)
+  --wake               Deliver one wave of pending wake events and exit
+  --wake-status        Print the wake outbox and exit (read-only)
+  --wake-register <id> Record the team lead's session for wake delivery
+  --wake-max-cost <usd>  Soft per-wave ceiling on reconciled cost (default: 1.00)
+  --wake-max-steps <n>   Hard wave ceiling on delivered messages (default: 20)
+  --wake-max-wall-ms <ms> Hard wave ceiling on wall clock (default: 1800000)
+  --wake-coalesce-ms <ms> Coalesce events per recipient (0 disables, default: 30000)
   --model <ref>        provider/model#variant (default: ${DEFAULT_MODEL})
   --timeout <seconds>  Per-step timeout (default: ${DEFAULT_TIMEOUT_SECONDS})
   --max-cost <usd>     Abort after the total cost exceeds this value
@@ -116,6 +140,8 @@ function parseArgs(argv: string[]): CliOptions {
     json: false,
     smoke: false,
     board: false,
+    wake: false,
+    wakeStatus: false,
     direct: false,
     planOnly: false,
     task: "",
@@ -206,6 +232,39 @@ function parseArgs(argv: string[]): CliOptions {
       case "--board":
         options.board = true;
         break;
+      case "--wake":
+        options.wake = true;
+        break;
+      case "--wake-status":
+        options.wakeStatus = true;
+        break;
+      case "--wake-register":
+        options.wakeRegister = next();
+        break;
+      case "--wake-max-cost":
+        options.wakeMaxCost = Number(next());
+        if (!Number.isFinite(options.wakeMaxCost) || options.wakeMaxCost < 0) {
+          throw new Error("--wake-max-cost must be a non-negative number");
+        }
+        break;
+      case "--wake-max-steps":
+        options.wakeMaxSteps = Number(next());
+        if (!Number.isInteger(options.wakeMaxSteps) || options.wakeMaxSteps <= 0) {
+          throw new Error("--wake-max-steps must be a positive integer");
+        }
+        break;
+      case "--wake-max-wall-ms":
+        options.wakeMaxWallMs = Number(next());
+        if (!Number.isFinite(options.wakeMaxWallMs) || options.wakeMaxWallMs <= 0) {
+          throw new Error("--wake-max-wall-ms must be a positive number");
+        }
+        break;
+      case "--wake-coalesce-ms":
+        options.wakeCoalesceMs = Number(next());
+        if (!Number.isFinite(options.wakeCoalesceMs) || options.wakeCoalesceMs < 0) {
+          throw new Error("--wake-coalesce-ms must be a non-negative number");
+        }
+        break;
       case "--direct":
         options.direct = true;
         break;
@@ -229,6 +288,9 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   options.task = positional.join(" ").trim();
+  if (options.wake && options.wakeRegister !== undefined) {
+    throw new Error("--wake-register cannot be combined with --wake");
+  }
   return options;
 }
 
@@ -555,6 +617,100 @@ function showBoard(projectDir: string): number {
   }
 }
 
+async function runWake(
+  projectDir: string,
+  options: CliOptions,
+  signal: AbortSignal,
+): Promise<number> {
+  // Registration is configuration, not delivery: the kill-switch must not
+  // silence it.
+  if (options.wakeRegister !== undefined) {
+    const sessionID = options.wakeRegister;
+    const client = await createOpenCodeClient();
+    try {
+      await client.session.get({ sessionID });
+    } catch (error) {
+      log(
+        `wake: session is not readable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 1;
+    }
+    registerLeadSession(projectDir, sessionID, options.agent ?? "main");
+    log(`wake: team lead session recorded -> ${leadSessionFile(projectDir)}`);
+    return 0;
+  }
+
+  const dbFile = path.join(projectDir, ".deus", "board.db");
+  if (!fs.existsSync(dbFile)) {
+    log("wake: board is not created yet; nothing to deliver");
+    return 0;
+  }
+
+  if (isWakeDisabled(projectDir)) {
+    const queue = openWakeReadonly(projectDir);
+    if (!queue) {
+      log("wake: disabled by kill-switch; outbox is not created yet");
+      return 0;
+    }
+    const pending = queue.stats().pending;
+    queue.close();
+    log(`wake: disabled by kill-switch (DEUS_WAKE=0 or .deus/wake.disabled); pending=${pending}`);
+    return 0;
+  }
+
+  const queue = openWake(projectDir);
+  try {
+    const client = await createOpenCodeClient();
+    const result = await runWave(client, queue, {
+      maxCost: options.wakeMaxCost,
+      maxSteps: options.wakeMaxSteps,
+      maxWallMs: options.wakeMaxWallMs,
+      coalesceMs: options.wakeCoalesceMs,
+      signal,
+    });
+    console.log(
+      `wake: ${result.outcome} delivered=${result.delivered} messages=${result.messages} ` +
+        `failed=${result.failed} expired=${result.expired} skipped=${result.skipped} ` +
+        `pending=${result.pendingLeft} wavecost=~$${result.cost.toFixed(4)}`,
+    );
+    return result.failed > 0 ? 1 : 0;
+  } finally {
+    queue.close();
+  }
+}
+
+function showWakeStatus(projectDir: string): number {
+  if (!fs.existsSync(path.join(projectDir, ".deus", "board.db"))) {
+    console.log("wake: board is not created yet");
+    return 0;
+  }
+
+  const queue = openWakeReadonly(projectDir);
+  if (!queue) {
+    console.log("wake: outbox is not created yet; open the board once to migrate");
+    return 0;
+  }
+
+  try {
+    const stats = queue.stats();
+    console.log(
+      `wake: pending=${stats.pending} delivered=${stats.delivered} failed=${stats.failed} ` +
+        `expired=${stats.expired} cancelled=${stats.cancelled} totalcost=~$${stats.knownCost.toFixed(4)}`,
+    );
+    if (stats.nextAt) console.log(`next_at: ${stats.nextAt}`);
+    for (const event of queue.list({ limit: 20 })) {
+      const to = event.recipient.sessionID || "no session";
+      const error = event.lastError ? ` (${event.lastError})` : "";
+      console.log(
+        `  [${event.status}] ${event.eventType} ${event.boardTaskId ?? "-"} -> ${to}${error}`,
+      );
+    }
+    return 0;
+  } finally {
+    queue.close();
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -576,6 +732,16 @@ async function main(): Promise<void> {
 
   if (options.board) {
     process.exitCode = showBoard(path.resolve(options.cwd));
+    return;
+  }
+
+  if (options.wakeStatus) {
+    process.exitCode = showWakeStatus(path.resolve(options.cwd));
+    return;
+  }
+
+  if (options.wake || options.wakeRegister !== undefined) {
+    process.exitCode = await runWake(path.resolve(options.cwd), options, controller.signal);
     return;
   }
 

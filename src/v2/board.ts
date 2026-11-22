@@ -1,10 +1,10 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 
-const SCHEMA_VERSION = 2;
+import { openStore, openStoreReadonly } from "./store.ts";
+import { enqueueTransitionWake, cancelTaskWakes } from "./wake.ts";
+
 const DEFAULT_LEASE_MS = 120_000;
 const MAX_LEASE_MS = 600_000;
 const DEFAULT_TASK_RETENTION_DAYS = 30;
@@ -162,6 +162,7 @@ export interface Board {
   prune(options?: { taskDays?: number; eventDays?: number }): {
     tasks: number;
     events: number;
+    wakes: number;
   };
   close(): void;
 }
@@ -214,73 +215,6 @@ interface EventRow {
   payload_json: string;
   created_at: string;
 }
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS teams (
-    team_id       TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    goal          TEXT NOT NULL,
-    lead_agent    TEXT NOT NULL,
-    status        TEXT NOT NULL CHECK(status IN ('active', 'done', 'archived')),
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    closed_at     TEXT,
-    last_event_id TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_name
-    ON teams(name) WHERE status = 'active';
-
-CREATE TABLE IF NOT EXISTS board_tasks (
-    board_task_id   TEXT PRIMARY KEY,
-    team_id         TEXT NOT NULL,
-    title           TEXT NOT NULL,
-    goal            TEXT NOT NULL,
-    done_when       TEXT NOT NULL DEFAULT '',
-    assignee        TEXT,
-    workspace       TEXT,
-    status          TEXT NOT NULL CHECK(status IN (
-        'backlog', 'claimed', 'running', 'review', 'done', 'blocked', 'cancelled'
-    )),
-    priority        INTEGER NOT NULL DEFAULT 0,
-    depends_on_json TEXT NOT NULL DEFAULT '[]',
-    execution_ref   TEXT,
-    result_summary  TEXT,
-    blocked_reason  TEXT,
-    artifacts_json  TEXT NOT NULL DEFAULT '[]',
-    verification_json TEXT,
-    created_by      TEXT NOT NULL,
-    claim_token     TEXT,
-    lease_until     TEXT,
-    attempt         INTEGER NOT NULL DEFAULT 1,
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-    claimed_at      TEXT,
-    finished_at     TEXT,
-    last_event_id   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_board_tasks_team_status
-    ON board_tasks(team_id, status, priority DESC, created_at);
-CREATE INDEX IF NOT EXISTS idx_board_tasks_assignee
-    ON board_tasks(assignee, status);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_board_tasks_execution
-    ON board_tasks(execution_ref) WHERE execution_ref IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_board_tasks_lease
-    ON board_tasks(status, lease_until);
-
-CREATE TABLE IF NOT EXISTS board_events (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id      TEXT NOT NULL UNIQUE,
-    team_id       TEXT NOT NULL,
-    board_task_id TEXT,
-    event_type    TEXT NOT NULL,
-    actor         TEXT NOT NULL,
-    payload_json  TEXT NOT NULL DEFAULT '{}',
-    created_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_board_events_team ON board_events(team_id, id);
-CREATE INDEX IF NOT EXISTS idx_board_events_task ON board_events(board_task_id, id);
-CREATE INDEX IF NOT EXISTS idx_board_events_type ON board_events(event_type, id);
-`;
 
 function makeId(prefix: string): string {
   return `${prefix}-${crypto.randomBytes(6).toString("hex")}`;
@@ -359,26 +293,6 @@ function toEvent(row: EventRow): BoardEvent {
   };
 }
 
-function migrate(db: Database.Database): void {
-  const version = db.pragma("user_version", { simple: true }) as number;
-  if (version >= SCHEMA_VERSION) return;
-
-  db.transaction(() => {
-    db.exec(SCHEMA);
-    if (version < 2) {
-      // v1 made every non-archived name unique, so a closed team kept its name
-      // forever and a fresh active `main` could not be seeded. Names are unique
-      // among active teams only.
-      db.exec(
-        `DROP INDEX IF EXISTS idx_teams_name;
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_name
-           ON teams(name) WHERE status = 'active';`,
-      );
-    }
-    db.pragma(`user_version = ${SCHEMA_VERSION}`);
-  }).immediate();
-}
-
 function ensureMainTeam(db: Database.Database): void {
   const existing = db
     .prepare(`SELECT team_id FROM teams WHERE name = 'main' AND status = 'active'`)
@@ -393,7 +307,10 @@ function ensureMainTeam(db: Database.Database): void {
 }
 
 class SqliteBoard implements Board {
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly projectDir: string,
+  ) {}
 
   /**
    * Every state change runs as BEGIN IMMEDIATE. A deferred transaction reads a
@@ -695,6 +612,19 @@ class SqliteBoard implements Board {
       this.recordEvent(row.team_id, taskId, "task/submitted", actorOf(claimToken), {
         verification,
       });
+      // Same transaction as the status change: a review result must wake
+      // someone even if the process dies right after submit.
+      enqueueTransitionWake(this.db, this.projectDir, {
+        teamId: row.team_id,
+        taskId,
+        attempt: row.attempt,
+        eventType: "task/review-ready",
+        executionRef: row.execution_ref ?? undefined,
+        preferTaskSession: true,
+        title: row.title,
+        status: "review",
+        payload: { verification, summary: result.summary },
+      });
     });
   }
 
@@ -729,6 +659,7 @@ class SqliteBoard implements Board {
         )
         .run(now, now, taskId);
       this.recordEvent(row.team_id, taskId, "task/accepted", actor, {});
+      cancelTaskWakes(this.db, taskId, "accepted");
     });
   }
 
@@ -755,6 +686,7 @@ class SqliteBoard implements Board {
         )
         .run(now, taskId);
       this.recordEvent(row.team_id, taskId, "task/reworked", actor, {});
+      cancelTaskWakes(this.db, taskId, "reworked");
     });
   }
 
@@ -786,6 +718,16 @@ class SqliteBoard implements Board {
         )
         .run(reason, now, taskId);
       this.recordEvent(row.team_id, taskId, "task/blocked", actor, { reason });
+      enqueueTransitionWake(this.db, this.projectDir, {
+        teamId: row.team_id,
+        taskId,
+        attempt: row.attempt,
+        eventType: "task/blocked",
+        preferTaskSession: false,
+        title: row.title,
+        status: "blocked",
+        payload: { reason, previousStatus: row.status },
+      });
     });
   }
 
@@ -811,6 +753,7 @@ class SqliteBoard implements Board {
         )
         .run(now, taskId);
       this.recordEvent(row.team_id, taskId, "task/retried", actor, {});
+      cancelTaskWakes(this.db, taskId, "retried");
     });
   }
 
@@ -837,6 +780,7 @@ class SqliteBoard implements Board {
         )
         .run(now, now, taskId);
       this.recordEvent(row.team_id, taskId, "task/cancelled", actor, {});
+      cancelTaskWakes(this.db, taskId, "cancelled");
     });
   }
 
@@ -908,7 +852,7 @@ class SqliteBoard implements Board {
 
   prune(
     options: { taskDays?: number; eventDays?: number } = {},
-  ): { tasks: number; events: number } {
+  ): { tasks: number; events: number; wakes: number } {
     const taskDays = options.taskDays ?? DEFAULT_TASK_RETENTION_DAYS;
     const eventDays = options.eventDays ?? DEFAULT_EVENT_RETENTION_DAYS;
     const taskCutoff = new Date(Date.now() - taskDays * 86_400_000).toISOString();
@@ -937,7 +881,14 @@ class SqliteBoard implements Board {
                    OR board_task_id NOT IN (SELECT board_task_id FROM board_tasks))`,
         )
         .run(eventCutoff).changes;
-      return { tasks, events };
+      const wakes = this.db
+        .prepare(
+          `DELETE FROM wake_events
+            WHERE status IN ('delivered', 'failed', 'expired', 'cancelled')
+              AND created_at < ?`,
+        )
+        .run(eventCutoff).changes;
+      return { tasks, events, wakes };
     });
   }
 
@@ -1086,36 +1037,21 @@ export interface OpenBoardOptions {
  * corrupting or deadlocking each other.
  */
 export function openBoard(projectDir: string, options: OpenBoardOptions = {}): Board {
-  const dir = path.join(projectDir, ".deus");
-  const file = path.join(dir, "board.db");
-
   if (options.readonly) {
-    if (!fs.existsSync(file)) {
-      throw new BoardError("not_found", `board is not created yet: ${file}`);
+    const db = openStoreReadonly(projectDir);
+    if (!db) {
+      throw new BoardError("not_found", `board is not created yet: ${projectDir}/.deus/board.db`);
     }
-    const db = new Database(file, { readonly: true, fileMustExist: true });
-    db.pragma("busy_timeout = 5000");
-    return new SqliteBoard(db);
+    return new SqliteBoard(db, projectDir);
   }
 
-  fs.mkdirSync(dir, { recursive: true });
-  const gitignore = path.join(dir, ".gitignore");
-  if (!fs.existsSync(gitignore)) {
-    fs.writeFileSync(gitignore, "*\n", "utf-8");
-  }
-
-  const db = new Database(file);
-  const journalMode = db.pragma("journal_mode = WAL", { simple: true }) as string;
-  if (String(journalMode).toLowerCase() !== "wal") {
+  const db = openStore(projectDir);
+  try {
+    ensureMainTeam(db);
+  } catch (error) {
     db.close();
-    throw new Error(
-      `board: WAL is unavailable (journal_mode=${journalMode}); a long-lived team cannot share this database`,
-    );
+    throw error;
   }
-  db.pragma("busy_timeout = 5000");
-  db.pragma("foreign_keys = OFF");
-  migrate(db);
-  ensureMainTeam(db);
 
-  return new SqliteBoard(db);
+  return new SqliteBoard(db, projectDir);
 }
