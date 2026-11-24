@@ -1,5 +1,5 @@
 {
-  "model": "opencode-go/hy4-flash-free#high",
+  "model": "opencode-go/hungerg-free",
   "maxCost": 0.2,
   "checks": {
     "test": "npm test",
