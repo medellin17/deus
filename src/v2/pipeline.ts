@@ -484,10 +484,21 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       saveRunState(runDir, state);
     } else {
       options.onProgress?.({ type: "baseline-start" });
-      const baseline = runGate(checks, state.workDir, {
+      const baseline = await runGate(checks, state.workDir, {
         timeoutMs: options.checkTimeoutMs,
         stopOnFirstFailure: false,
+        signal: options.signal,
       });
+      if (baseline.aborted || options.signal?.aborted) {
+        state.baseline = {
+          status: "skipped",
+          checks: [],
+          durationMs: 0,
+          warnings: ["baseline was interrupted; resumed checks are strict"],
+        };
+        saveRunState(runDir, state);
+        return finish("interrupted", "run interrupted");
+      }
       state.baseline = baseline;
       options.onProgress?.({ type: "baseline-end", gate: baseline });
       saveRunState(runDir, state);
@@ -540,6 +551,11 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       result.attempt = attempt;
       result.priorCost = priorCost;
 
+      if (options.signal?.aborted) {
+        result.status = "failed";
+        result.error = "run interrupted";
+        return result;
+      }
       if (result.status !== "succeeded") return result;
 
       const afterFingerprint = worktreeFingerprint(state.workDir);
@@ -558,14 +574,20 @@ export async function runPipeline(options: RunPipelineOptions): Promise<Pipeline
       if (!gated) return result;
 
       options.onProgress?.({ type: "gate-start", index, step, attempt });
-      const current = runGate(checks, state.workDir, {
+      const current = await runGate(checks, state.workDir, {
         timeoutMs: options.checkTimeoutMs,
         stopOnFirstFailure: effectiveBaseline?.status !== "failed",
+        signal: options.signal,
       });
       const gate = applyBaseline(effectiveBaseline, current);
       result.gate = gate;
       options.onProgress?.({ type: "gate-end", index, step, gate });
 
+      if (options.signal?.aborted || gate.aborted) {
+        result.status = "failed";
+        result.error = "run interrupted";
+        return result;
+      }
       if (gate.status !== "failed") return result;
 
       const spent =

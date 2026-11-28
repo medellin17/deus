@@ -63,6 +63,8 @@ export interface GateResult {
   warnings?: string[];
   /** Result of the same checks on the untouched worktree. */
   baselineStatus?: "passed" | "failed" | "skipped";
+  /** The run was interrupted while checks were running. */
+  aborted?: boolean;
 }
 
 export interface StepExecution {
@@ -106,6 +108,8 @@ export interface ApplyResult {
   mergeCommand?: string;
   /** Agent session that resolved merge conflicts, if any. */
   resolution?: StepExecution;
+  /** The run was interrupted before or after apply. */
+  aborted?: boolean;
 }
 
 export interface RunState {

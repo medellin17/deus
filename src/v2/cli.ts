@@ -1481,8 +1481,13 @@ async function main(): Promise<void> {
         maxCost,
         signal: controller.signal,
       },
+      signal: controller.signal,
     });
     result.state.apply = applied;
+    if (applied.aborted) {
+      result.state.status = "interrupted";
+      result.state.error = applied.reason ?? "run interrupted during apply";
+    }
     persistRunState(result.runDir, result.state);
 
     if (applied.resolution) {

@@ -131,6 +131,55 @@ void describe("applyRun", () => {
     assert.equal(git(repo, "status", "--porcelain"), "");
   });
 
+  void it("does not commit or merge when already aborted", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "two\n", "utf-8");
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state: stateFor(repo, prepared),
+      merge: true,
+      signal: controller.signal,
+    });
+
+    assert.equal(result.status, "skipped");
+    assert.equal(result.aborted, true);
+    assert.match(result.reason ?? "", /interrupted before commit/);
+    assert.equal(git(repo, "branch", "--list", "deus/run-test"), "");
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "one\n");
+  });
+
+  void it("rolls back its own merge when aborted after merge", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "two\n", "utf-8");
+    const headBefore = git(repo, "rev-parse", "HEAD");
+    const signal = {
+      get aborted(): boolean {
+        return git(repo, "rev-parse", "HEAD") !== headBefore;
+      },
+    } as unknown as AbortSignal;
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state: stateFor(repo, prepared),
+      merge: true,
+      signal,
+    });
+
+    assert.equal(result.status, "skipped");
+    assert.equal(result.aborted, true);
+    assert.match(result.reason ?? "", /merge rolled back/);
+    assert.equal(git(repo, "rev-parse", "HEAD"), headBefore);
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "one\n");
+    assert.equal(git(repo, "status", "--porcelain"), "");
+  });
+
   void it("keeps the branch when merging is disabled", async () => {
     const repo = makeRepo();
     const prepared = prepare(repo);
@@ -216,6 +265,34 @@ void describe("applyRun", () => {
     assert.equal(result.resolution?.gate?.status, "passed");
     assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "merged\n");
     assert.match(git(repo, "log", "-1", "--format=%s"), /^Merge deus run-test/);
+    assert.equal(git(repo, "status", "--porcelain"), "");
+  });
+
+  void it("aborts conflict merge when the run is interrupted", async () => {
+    const repo = makeRepo();
+    const prepared = prepare(repo);
+    fs.writeFileSync(path.join(prepared.workDir, "file.txt"), "branch\n", "utf-8");
+    moveHeadWithConflict(repo);
+    const controller = new AbortController();
+    const executor = new FakeExecutor((input) => {
+      fs.writeFileSync(path.join(repo, "file.txt"), "merged\n", "utf-8");
+      controller.abort();
+      return execution(input, "resolved");
+    });
+
+    const result = await applyRun({
+      projectDir: repo,
+      workDir: prepared.workDir,
+      state: stateFor(repo, prepared),
+      merge: true,
+      resolve: { executor, timeoutMs: 1000, checks: [] },
+      signal: controller.signal,
+    });
+
+    assert.equal(result.status, "branch");
+    assert.equal(result.aborted, true);
+    assert.match(result.reason ?? "", /interrupted/);
+    assert.equal(fs.readFileSync(path.join(repo, "file.txt"), "utf-8"), "main\n");
     assert.equal(git(repo, "status", "--porcelain"), "");
   });
 

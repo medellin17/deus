@@ -287,6 +287,46 @@ void describe("runPipeline", () => {
     assert.deepEqual(executor.calls, []);
   });
 
+  void it("does not save an aborted baseline as a red baseline", async () => {
+    const steps: PipelineStepDef[] = [{ id: "one", agent: "a", task: "First", gate: true }];
+    const executor = new FakeExecutor((input) => ok(input, "out"));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runPipeline({
+        ...baseOptions(steps, executor),
+        checks: [{ name: "slow", command: "sleep 5" }],
+        signal: controller.signal,
+      });
+      assert.equal(result.state.status, "interrupted");
+      assert.equal(result.state.baseline?.status, "skipped");
+      assert.deepEqual(executor.calls, []);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  void it("stops a gated step when aborted during checks", async () => {
+    const steps: PipelineStepDef[] = [{ id: "one", agent: "a", task: "First", gate: true }];
+    const executor = new FakeExecutor((input) => ok(input, "out"));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runPipeline({
+        ...baseOptions(steps, executor),
+        baseline: false,
+        checks: [{ name: "slow", command: "sleep 5" }],
+        signal: controller.signal,
+      });
+      assert.equal(result.state.status, "interrupted");
+      assert.equal(result.state.steps[0].error, "run interrupted");
+      assert.equal(result.state.steps[0].gate?.aborted, true);
+      assert.deepEqual(executor.calls, ["one"]);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   void it("retries a gated step and passes on the second attempt", async () => {
     const dir = tempDir();
     const steps: PipelineStepDef[] = [{ id: "impl", agent: "a", task: "Do", gate: true }];

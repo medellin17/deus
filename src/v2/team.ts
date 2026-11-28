@@ -296,14 +296,17 @@ interface Deps {
  * Gates the current HEAD in a throwaway worktree. Running in `projectDir`
  * would expose the checks to the worktrees of agents that are still working.
  */
-function gateAtHead(deps: Deps, baseline: GateResult | undefined): GateResult {
+async function gateAtHead(deps: Deps, baseline: GateResult | undefined): Promise<GateResult> {
   const id = `scratch-${shortRun(deps.options.runId)}-${deps.count.value++}`;
   const prepared = prepareWorkdir(deps.options.projectDir, id, true);
   if (!prepared.worktree) {
     throw new TeamError("not_git", "the post-merge gate needs a git worktree");
   }
   try {
-    return applyBaseline(baseline, runGate(deps.options.checks, prepared.workDir));
+    const current = await runGate(deps.options.checks, prepared.workDir, {
+      signal: deps.options.signal,
+    });
+    return applyBaseline(baseline, current);
   } finally {
     removeWorkdir(deps.options.projectDir, prepared.workDir);
   }
@@ -475,11 +478,18 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
       });
     }
 
+    if (options.signal?.aborted) {
+      return fail("run interrupted", "skipped");
+    }
     if (execution.status !== "succeeded") {
       return fail(`executor failed: ${execution.error ?? "no answer"}`, "blocked");
     }
 
-    gate = applyBaseline(taskBaseline, runGate(options.checks, workDir));
+    const current = await runGate(options.checks, workDir, { signal: options.signal });
+    gate = applyBaseline(taskBaseline, current);
+    if (options.signal?.aborted || gate.aborted) {
+      return fail("run interrupted", "skipped");
+    }
     if (gate.status === "failed") {
       // Keep the attempt as a branch even though it failed the gate: the next
       // attempt reads its diff, and nothing is merged, so the project never
@@ -521,6 +531,9 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
       };
     }
 
+    if (options.signal?.aborted) {
+      return fail("run interrupted", "skipped");
+    }
     if (!attachAgentCommit(options.projectDir, workDir, branch, prepared.baseCommit)) {
       return fail("cannot attach a branch to the agent's commit", "blocked");
     }
@@ -556,6 +569,9 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
     }
 
     return await deps.mergeLock(async () => {
+      if (options.signal?.aborted) {
+        return fail("run interrupted", "skipped");
+      }
       // The exact commit this task merges into. `ORIG_HEAD` is shared mutable
       // state: another git command may have moved it, so it must not decide a
       // rollback.
@@ -572,7 +588,7 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
       if (merge.status === "merged" || merge.status === "already-merged") {
         let post: GateResult;
         try {
-          post = gateAtHead(deps, taskBaseline);
+          post = await gateAtHead(deps, taskBaseline);
         } catch (error) {
           post = {
             status: "failed",
@@ -588,7 +604,8 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
           return fail("HEAD no longer contains the merge; nothing was accepted", "blocked");
         }
 
-        if (post.status !== "passed") {
+        const interrupted = options.signal?.aborted === true || post.aborted === true;
+        if (interrupted || post.status !== "passed") {
           // Only undo a merge this run created, and only to the commit we saw.
           // `already-merged` means the project moved some other way: resetting
           // there would throw away someone else's work.
@@ -608,7 +625,9 @@ async function runTask(task: BoardTask, deps: Deps, baseline: { value: GateResul
                   ? " (merge rolled back)"
                   : " (rollback failed: check the project by hand)";
           return fail(
-            `post-merge gate failed: ${post.error ?? "checks failed"}${suffix}`,
+            interrupted
+              ? `run interrupted after merge${suffix}`
+              : `post-merge gate failed: ${post.error ?? "checks failed"}${suffix}`,
             "blocked",
           );
         }
@@ -816,16 +835,29 @@ export async function runCodingTeam(
 
     const short = shortRun(options.runId);
     shortRunId = short;
-    const prepared = prepareWorkdir(projectDir, `baseline-${short}`, true);
-    if (!prepared.worktree) {
-      throw new TeamError("not_git", "--team-run needs a git repository with a checked-out branch");
-    }
-    let baseline: GateResult;
-    try {
-      baseline = applyBaseline(undefined, runGate(options.checks, prepared.workDir));
-      options.onProgress?.(`baseline: ${baseline.status}`);
-    } finally {
-      removeWorkdir(projectDir, prepared.workDir);
+    let baseline: GateResult = {
+      status: "skipped",
+      checks: [],
+      durationMs: 0,
+      warnings: ["run was interrupted before baseline"],
+    };
+    if (!options.signal?.aborted) {
+      const prepared = prepareWorkdir(projectDir, `baseline-${short}`, true);
+      if (!prepared.worktree) {
+        throw new TeamError("not_git", "--team-run needs a git repository with a checked-out branch");
+      }
+      try {
+        const current = await runGate(options.checks, prepared.workDir, {
+          signal: options.signal,
+        });
+        if (current.aborted || options.signal?.aborted) {
+          throw new TeamError("interrupted", "run interrupted during baseline");
+        }
+        baseline = applyBaseline(undefined, current);
+        options.onProgress?.(`baseline: ${baseline.status}`);
+      } finally {
+        removeWorkdir(projectDir, prepared.workDir);
+      }
     }
 
     const actor = options.actor ?? "team";

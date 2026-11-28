@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 
 import type { CheckCommand, CheckResult, GateResult } from "./types.ts";
 
@@ -19,54 +19,69 @@ export function runCheck(
   check: CheckCommand,
   cwd: string,
   timeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
-): CheckResult {
+  signal?: AbortSignal,
+): Promise<CheckResult> {
   const started = Date.now();
-  const result = spawnSync(check.command, {
-    shell: true,
-    cwd,
-    encoding: "utf-8",
-    timeout: timeoutMs,
-    maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
+
+  return new Promise((resolve) => {
+    execFile(
+      check.command,
+      {
+        shell: true,
+        cwd,
+        encoding: "utf-8",
+        timeout: timeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env, CI: "1", FORCE_COLOR: "0", NO_COLOR: "1" },
+        signal,
+      },
+      (error, stdout, stderr) => {
+        const output = truncateCheckOutput(`${stdout ?? ""}${stderr ?? ""}`);
+        const errorCode = (error as NodeJS.ErrnoException | undefined)?.code;
+        const aborted = signal?.aborted === true || error?.name === "AbortError";
+        const timedOut =
+          !aborted &&
+          (errorCode === "ETIMEDOUT" ||
+            (error !== null && error !== undefined && error.signal != null));
+        const exitCode =
+          typeof errorCode === "number" ? errorCode : error === null ? 0 : null;
+        const status: CheckResult["status"] = aborted
+          ? "failed"
+          : timedOut
+            ? "timedOut"
+            : error === null
+              ? "passed"
+              : "failed";
+
+        resolve({
+          name: check.name,
+          command: check.command,
+          status,
+          exitCode,
+          durationMs: Date.now() - started,
+          output,
+        });
+      },
+    );
   });
-
-  const output = truncateCheckOutput(`${result.stdout ?? ""}${result.stderr ?? ""}`);
-  const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  const timedOut =
-    errorCode === "ETIMEDOUT" || (result.status === null && result.signal !== null);
-
-  const status: CheckResult["status"] = timedOut
-    ? "timedOut"
-    : result.status === 0 && !result.error
-      ? "passed"
-      : "failed";
-
-  return {
-    name: check.name,
-    command: check.command,
-    status,
-    exitCode: result.status ?? null,
-    durationMs: Date.now() - started,
-    output,
-  };
 }
 
 export interface RunGateOptions {
   timeoutMs?: number;
   /** Baseline runs need every check, not only the first failure. */
   stopOnFirstFailure?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
  * Runs checks in order. A failed check means the step did not achieve its
  * goal, regardless of what the agent reported.
  */
-export function runGate(
+export async function runGate(
   checks: CheckCommand[],
   cwd: string,
   options: RunGateOptions = {},
-): GateResult {
+): Promise<GateResult> {
   const started = Date.now();
 
   if (checks.length === 0) {
@@ -76,8 +91,28 @@ export function runGate(
   const results: CheckResult[] = [];
 
   for (const check of checks) {
-    const result = runCheck(check, cwd, options.timeoutMs);
+    if (options.signal?.aborted) {
+      return {
+        status: "failed",
+        checks: results,
+        durationMs: Date.now() - started,
+        error: "run interrupted",
+        aborted: true,
+      };
+    }
+
+    const result = await runCheck(check, cwd, options.timeoutMs, options.signal);
     results.push(result);
+
+    if (options.signal?.aborted) {
+      return {
+        status: "failed",
+        checks: results,
+        durationMs: Date.now() - started,
+        error: "run interrupted",
+        aborted: true,
+      };
+    }
 
     if (result.status !== "passed" && options.stopOnFirstFailure !== false) {
       break;

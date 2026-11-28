@@ -9,9 +9,12 @@ import {
   branchHead,
   commitWorktree,
   conflictedFiles,
+  headIs,
   ignoredChangedPaths,
   listFiles,
   recoverUnfinishedMerge,
+  resetKeeping,
+  revParse,
   shortHead,
 } from "./gitflow.ts";
 import type {
@@ -77,6 +80,7 @@ export interface ApplyOptions {
   merge: boolean;
   /** Resolve merge conflicts with an agent instead of leaving the branch. */
   resolve?: ConflictResolverOptions;
+  signal?: AbortSignal;
 }
 
 function shortTask(task: string): string {
@@ -150,6 +154,9 @@ async function resolveConflicts(
       reason: resolution.error ?? "conflict resolver failed",
     };
   }
+  if (resolver.signal?.aborted) {
+    return { ok: false, resolution, reason: "run interrupted after conflict resolution" };
+  }
 
   if (
     resolver.maxCost !== undefined &&
@@ -192,12 +199,16 @@ async function resolveConflicts(
   // Checks run before staging, so the committed tree is exactly the tree that
   // passed. If a check rewrites files, they are staged afterwards.
   if (resolver.checks.length > 0) {
-    const current = runGate(resolver.checks, projectDir, {
+    const current = await runGate(resolver.checks, projectDir, {
       timeoutMs: resolver.checkTimeoutMs,
       stopOnFirstFailure: resolver.baseline?.status !== "failed",
+      signal: resolver.signal,
     });
     const gate = applyBaseline(resolver.baseline, current);
     resolution.gate = gate;
+    if (resolver.signal?.aborted || gate.aborted) {
+      return { ok: false, resolution, reason: "run interrupted after conflict checks" };
+    }
     if (gate.status === "failed") {
       return {
         ok: false,
@@ -229,6 +240,10 @@ async function resolveConflicts(
       resolution,
       reason: `checks created untracked files: ${afterChecksUntracked.join(", ")}`,
     };
+  }
+
+  if (resolver.signal?.aborted) {
+    return { ok: false, resolution, reason: "run interrupted before staging conflicts" };
   }
 
   const staged = git(projectDir, ["add", "--", ...conflicts]);
@@ -321,6 +336,17 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
         mergeCommand,
       };
     }
+  }
+
+  if (options.signal?.aborted) {
+    return {
+      status: "skipped",
+      reason: "run interrupted before commit",
+      branch,
+      commit: commitHash,
+      mergeCommand,
+      aborted: true,
+    };
   }
 
   const committed = commitWorktree({ projectDir, workDir, branch, message });
@@ -416,6 +442,18 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     );
   }
 
+  if (options.signal?.aborted) {
+    return {
+      status: "skipped",
+      reason: "run interrupted before merge",
+      branch,
+      commit: commitHash,
+      mergeCommand,
+      aborted: true,
+    };
+  }
+
+  const headBeforeMerge = revParse(projectDir, "HEAD");
   const merge = attemptMerge({
     projectDir,
     branch,
@@ -425,6 +463,24 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
   });
 
   if (merge.status === "merged") {
+    if (options.signal?.aborted) {
+      const mergedHead = merge.commit ?? shortHead(projectDir);
+      const rolledBack =
+        merge.commit !== undefined &&
+        headBeforeMerge !== undefined &&
+        headIs(projectDir, merge.commit) &&
+        resetKeeping(projectDir, headBeforeMerge);
+      return {
+        status: "skipped",
+        reason: rolledBack
+          ? "run interrupted after merge; merge rolled back"
+          : "run interrupted after merge; rollback was not safe or failed",
+        branch,
+        commit: rolledBack ? headBeforeMerge : mergedHead,
+        mergeCommand,
+        aborted: true,
+      };
+    }
     return {
       status: "merged",
       branch,
@@ -435,8 +491,30 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
 
   const conflicts = conflictedFiles(projectDir);
   if (conflicts.length > 0 && options.resolve) {
-    const outcome = await resolveConflicts(options, options.resolve, conflicts);
+    const outcome = await resolveConflicts(options, {
+      ...options.resolve,
+      signal: options.resolve.signal ?? options.signal,
+    }, conflicts);
     if (outcome.ok) {
+      if (options.signal?.aborted) {
+        const mergedHead = shortHead(projectDir);
+        const rolledBack =
+          headBeforeMerge !== undefined &&
+          mergedHead !== undefined &&
+          headIs(projectDir, mergedHead) &&
+          resetKeeping(projectDir, headBeforeMerge);
+        return {
+          status: "skipped",
+          reason: rolledBack
+            ? "run interrupted after conflict merge; merge rolled back"
+            : "run interrupted after conflict merge; rollback was not safe or failed",
+          branch,
+          commit: rolledBack ? headBeforeMerge : mergedHead,
+          mergeCommand,
+          resolution: outcome.resolution,
+          aborted: true,
+        };
+      }
       return {
         status: "merged",
         branch,
@@ -455,10 +533,13 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
         commit: commitHash,
         mergeCommand,
         resolution: outcome.resolution,
+        aborted: options.signal?.aborted,
       };
     }
 
-    return branchResult(outcome.reason ?? "conflict resolution failed", outcome.resolution);
+    const result = branchResult(outcome.reason ?? "conflict resolution failed", outcome.resolution);
+    if (options.signal?.aborted) result.aborted = true;
+    return result;
   }
 
   const abort = git(projectDir, ["merge", "--abort"]);
@@ -469,8 +550,11 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       branch,
       commit: commitHash,
       mergeCommand,
+      aborted: options.signal?.aborted,
     };
   }
 
-  return branchResult(merge.reason ?? "merge failed");
+  const result = branchResult(merge.reason ?? "merge failed");
+  if (options.signal?.aborted) result.aborted = true;
+  return result;
 }

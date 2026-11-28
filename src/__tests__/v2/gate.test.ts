@@ -26,14 +26,14 @@ after(() => {
 });
 
 void describe("runCheck", () => {
-  void it("passes on exit code 0", () => {
-    const result = runCheck({ name: "ok", command: "true" }, tempDir());
+  void it("passes on exit code 0", async () => {
+    const result = await runCheck({ name: "ok", command: "true" }, tempDir());
     assert.equal(result.status, "passed");
     assert.equal(result.exitCode, 0);
   });
 
-  void it("fails on a non-zero exit code and keeps the output", () => {
-    const result = runCheck(
+  void it("fails on a non-zero exit code and keeps the output", async () => {
+    const result = await runCheck(
       { name: "bad", command: "echo boom && exit 3" },
       tempDir(),
     );
@@ -42,26 +42,43 @@ void describe("runCheck", () => {
     assert.match(result.output, /boom/);
   });
 
-  void it("marks a check as timed out", () => {
-    const result = runCheck({ name: "slow", command: "sleep 5" }, tempDir(), 100);
+  void it("marks a check as timed out", async () => {
+    const result = await runCheck({ name: "slow", command: "sleep 5" }, tempDir(), 100);
     assert.equal(result.status, "timedOut");
+  });
+
+  void it("aborts a running check", async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runCheck(
+        { name: "slow", command: "sleep 5" },
+        tempDir(),
+        5_000,
+        controller.signal,
+      );
+      assert.equal(result.status, "failed");
+      assert.ok(result.durationMs < 2_000, `abort took ${result.durationMs}ms`);
+    } finally {
+      clearTimeout(timer);
+    }
   });
 });
 
 void describe("runGate", () => {
-  void it("returns skipped without checks", () => {
-    const gate = runGate([], tempDir());
+  void it("returns skipped without checks", async () => {
+    const gate = await runGate([], tempDir());
     assert.equal(gate.status, "skipped");
     assert.deepEqual(gate.checks, []);
   });
 
-  void it("stops at the first failing check", () => {
+  void it("stops at the first failing check", async () => {
     const checks: CheckCommand[] = [
       { name: "first", command: "false" },
       { name: "second", command: "true" },
     ];
 
-    const gate = runGate(checks, tempDir());
+    const gate = await runGate(checks, tempDir());
 
     assert.equal(gate.status, "failed");
     assert.equal(gate.checks.length, 1);
@@ -69,13 +86,39 @@ void describe("runGate", () => {
     assert.match(gate.error ?? "", /check "first" failed/);
   });
 
-  void it("runs checks in the work directory", () => {
+  void it("runs checks in the work directory", async () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, "marker"), "1", "utf-8");
 
-    const gate = runGate([{ name: "marker", command: "test -f marker" }], dir);
+    const gate = await runGate([{ name: "marker", command: "test -f marker" }], dir);
 
     assert.equal(gate.status, "passed");
+  });
+
+  void it("does not block the event loop while a check runs", async () => {
+    const started = Date.now();
+    const pending = runGate([{ name: "slow", command: "sleep 0.2" }], tempDir());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(Date.now() - started < 150, "the event loop was blocked by the check");
+    const gate = await pending;
+    assert.equal(gate.status, "passed");
+  });
+
+  void it("marks an interrupted gate as aborted", async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      const gate = await runGate(
+        [{ name: "slow", command: "sleep 5" }],
+        tempDir(),
+        { signal: controller.signal },
+      );
+      assert.equal(gate.status, "failed");
+      assert.equal(gate.aborted, true);
+      assert.match(gate.error ?? "", /interrupted/);
+    } finally {
+      clearTimeout(timer);
+    }
   });
 });
 

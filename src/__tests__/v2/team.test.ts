@@ -543,6 +543,35 @@ void describe("runCodingTeam", () => {
     assert.equal(board.getTask(second)?.status, "backlog");
   });
 
+  void it("does not merge when aborted during the task gate", async () => {
+    const repo = makeRepo();
+    const { board, teamId } = makeBoard(repo);
+    const taskId = addTask(board, teamId, "slow gate");
+    const { executor, calls } = fakeExecutor({
+      run: (input) => {
+        fs.writeFileSync(path.join(input.workDir, "slow"), "1\n", "utf-8");
+        fs.writeFileSync(path.join(input.workDir, "a.txt"), "a\n", "utf-8");
+      },
+    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 100);
+    try {
+      const result = await runCodingTeam({} as OpenCodeClient, board, {
+        ...teamOptions(repo, teamId, "run-abortgate", executor),
+        checks: [{ name: "slow", command: "if test -f slow; then sleep 5; else exit 0; fi" }],
+        signal: controller.signal,
+      });
+      assert.equal(calls.length, 1);
+      assert.equal(result.tasks[0].status, "skipped");
+      assert.match(result.tasks[0].reason ?? "", /interrupted/);
+      assert.equal(board.getTask(taskId)?.status, "blocked");
+      assert.equal(fs.existsSync(path.join(repo, "a.txt")), false);
+      assert.equal(fs.existsSync(path.join(repo, ".deus", "run.lock")), false);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   void it("does not jam on a leftover worktree after a failed start", async () => {
     const repo = makeRepo();
     const { board, teamId } = makeBoard(repo);
